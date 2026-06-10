@@ -20,12 +20,19 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPOS_DIR="$SCRIPT_DIR/.repositories"
+KNOW_DIR="$SCRIPT_DIR/.knowledge"
+LOGS_DIR="$SCRIPT_DIR/.logs"
 INPUT_FILE="$SCRIPT_DIR/.repos.input"
 INTERVAL="${1:-15m}"
 SESSION="librarian"
 
 # --- 1. Scaffold (idempotent) ------------------------------------------------
-mkdir -p "$REPOS_DIR"
+# Create every runtime directory the librarian depends on up front, so nothing
+# downstream has to assume it exists. All three are gitignored, derived state:
+#   .repositories  the read-only mirror loop.sh clones/pulls into
+#   .knowledge     the curated maps digest.sh builds (overviews, decisions, …)
+#   .logs          the MCP server's audit + live-feed logs
+mkdir -p "$REPOS_DIR" "$KNOW_DIR" "$LOGS_DIR"
 
 if [ ! -f "$INPUT_FILE" ]; then
   cat > "$INPUT_FILE" <<'EOF'
@@ -71,6 +78,35 @@ if [ "${#missing[@]}" -gt 0 ]; then
     esac
   done
   exit 1
+fi
+
+# --- 2.5 Cold-start backfill -------------------------------------------------
+# Build the knowledge base for the mirror. We do NOT skip this just because some
+# maps already exist — backfill runs whenever repos are listed and keeps going
+# until every repo is deep-mapped. It is idempotent and cheap when complete: per
+# repo it skips work already finished and only fills what's missing or still
+# provisional. We (1) fetch every repo to completion FIRST — so the backfill sees
+# the whole mirror — then (2) launch the staged, parallel build in its own tmux
+# session, which holds .knowledge/.backfill.lock so the sync loop defers its
+# digest while it runs. Disable entirely with LIBRARIAN_NO_BACKFILL=1.
+BACKFILL_SESSION="librarian-backfill"
+has_repos_listed="$(grep -cvE '^\s*(#|$)' "$INPUT_FILE" 2>/dev/null || true)"
+has_repos_listed="${has_repos_listed:-0}"
+
+if [ "$has_repos_listed" -gt 0 ] && [ -z "${LIBRARIAN_NO_BACKFILL:-}" ]; then
+  if tmux has-session -t "=$BACKFILL_SESSION" 2>/dev/null; then
+    echo "Knowledge backfill already running (tmux '$BACKFILL_SESSION')."
+  else
+    echo "Ensuring full knowledge coverage — fetching all repos, then backfilling…"
+    # Synchronous full fetch (digest disabled here; the backfill owns indexing).
+    LIBRARIAN_NO_DIGEST=1 bash "$SCRIPT_DIR/loop.sh" || \
+      echo "warning: some repos failed to fetch; backfilling whatever landed." >&2
+
+    echo "Launching staged backfill in tmux '$BACKFILL_SESSION'…"
+    tmux new-session -d -s "$BACKFILL_SESSION" -c "$SCRIPT_DIR" \
+      "bash '$SCRIPT_DIR/utils/backfill.sh'; echo; echo '[backfill finished — press a key to close]'; read -n 1"
+    echo "  watch it:  tmux attach -t $BACKFILL_SESSION   (detach: Ctrl-b d)"
+  fi
 fi
 
 # --- 3. Start the remote MCP server (Streamable HTTP + bearer token) ---------
@@ -137,6 +173,9 @@ echo "Librarian is up. Background tmux sessions:"
 echo "  $SESSION  — sync daemon (Claude /loop → loop.sh)"
 if [ -n "${HTTP_SESSION:-}" ] && tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
   echo "  $HTTP_SESSION  — HTTP MCP server (http://${HTTP_HOST}:${HTTP_PORT}/mcp)"
+fi
+if tmux has-session -t "=$BACKFILL_SESSION" 2>/dev/null; then
+  echo "  $BACKFILL_SESSION  — cold-start knowledge build (one-time; exits when done)"
 fi
 echo
 echo "  List:   tmux ls"

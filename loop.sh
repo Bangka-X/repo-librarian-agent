@@ -72,7 +72,15 @@ echo "cloned: $cloned  pulled: $pulled  skipped: $skipped  failed: $failed"
 # whose commit changed (digest.sh is incremental, so unchanged repos are free).
 # Runs even if some repos failed above — the ones that synced still merit a map.
 # Skip with LIBRARIAN_NO_DIGEST=1, or if digest.sh isn't present.
-if [ -z "${LIBRARIAN_NO_DIGEST:-}" ] && [ -f "$SCRIPT_DIR/utils/digest.sh" ]; then
+#
+# Defer while a cold-start backfill is in progress: it is already building every
+# map (in parallel) and holds the lock, so running digest.sh now would race it.
+BACKFILL_LOCK="$SCRIPT_DIR/.knowledge/.backfill.lock"
+if [ -f "$BACKFILL_LOCK" ] \
+     && kill -0 "$(cat "$BACKFILL_LOCK" 2>/dev/null)" 2>/dev/null; then
+  echo "----"
+  echo "cold-start backfill in progress — deferring knowledge refresh this cycle."
+elif [ -z "${LIBRARIAN_NO_DIGEST:-}" ] && [ -f "$SCRIPT_DIR/utils/digest.sh" ]; then
   echo "----"
   echo "refreshing knowledge base..."
   bash "$SCRIPT_DIR/utils/digest.sh" || true

@@ -32,6 +32,10 @@
 #   bash utils/digest.sh sierra_crawler-tiktok # only this repo
 #   bash utils/digest.sh --force <repo>        # force just one
 #
+# Build modes (env vars; used by the cold-start backfill, utils/backfill.sh):
+#   DIGEST_MAPS_ONLY=1 bash utils/digest.sh --force <repo>   # just the repo map
+#   DIGEST_AGG_ONLY=1  bash utils/digest.sh                  # just overviews+graph
+#
 # Uses the machine's logged-in Claude subscription (no API key, no --bare).
 
 set -uo pipefail
@@ -60,6 +64,20 @@ for arg in "$@"; do
   esac
 done
 
+# Build modes — let the cold-start backfill split work across parallel workers:
+#   DIGEST_MAPS_ONLY=1  only (re)build per-repo maps; skip the aggregation passes
+#                       (project overviews, cross-project connections, top index).
+#   DIGEST_AGG_ONLY=1   skip per-repo maps; only (re)build the aggregation passes
+#                       from whatever maps exist — incrementally (missing or still
+#                       -provisional overviews only), so it's cheap when complete.
+# Unset (the steady-state default), it does both, incrementally.
+MAPS_ONLY="${DIGEST_MAPS_ONLY:-}"
+AGG_ONLY="${DIGEST_AGG_ONLY:-}"
+if [ -n "$MAPS_ONLY" ] && [ -n "$AGG_ONLY" ]; then
+  echo "error: DIGEST_MAPS_ONLY and DIGEST_AGG_ONLY are mutually exclusive." >&2
+  exit 2
+fi
+
 if ! command -v claude >/dev/null 2>&1; then
   echo "error: the 'claude' CLI is not on PATH." >&2
   exit 1
@@ -74,6 +92,8 @@ digested=0 skipped=0 failed=0
 failed_names=()
 digested_names=()
 
+# --- Per-repo maps (skipped entirely in aggregation-only mode) --------------
+if [ -z "$AGG_ONLY" ]; then
 for repo_path in "$REPOS_DIR"/*/; do
   [ -d "${repo_path}.git" ] || continue
   name="$(basename "$repo_path")"
@@ -186,6 +206,15 @@ Write ONLY these two files (.knowledge/${name}/index.md and .knowledge/${name}/.
     failed=$((failed + 1)); failed_names+=("$name")
   fi
 done
+fi  # end per-repo maps
+
+# maps-only mode: stop here, leaving the aggregation passes to a later call.
+if [ -n "$MAPS_ONLY" ]; then
+  echo "----"
+  echo "(maps-only) digested: $digested  skipped: $skipped  failed: $failed"
+  if [ "$failed" -gt 0 ]; then echo "failed: ${failed_names[*]}"; exit 1; fi
+  exit 0
+fi
 
 # --- Group mapped repos by project code -------------------------------------
 # The repo-name prefix (before the first '_' or '-') is the high-level project a
@@ -209,6 +238,7 @@ was_digested() {  # true if repo $1 was (re)digested this run
 # A project's overview is rebuilt only when a member changed (or it's missing),
 # so a quiet project costs nothing. Single-repo projects need no overview — that
 # repo's own map already serves; read_project_map falls back to it.
+agg_changed=0   # set when any overview is (re)built, so connections can refresh
 for proj in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do
   members=(${PROJ_MEMBERS[$proj]})
   [ "${#members[@]}" -ge 2 ] || continue
@@ -216,6 +246,9 @@ for proj in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do
   dirty=0
   [ "$FORCE" -eq 1 ] && dirty=1
   [ -f "$overview" ] || dirty=1
+  # A provisional overview (a cold-start stub) must be rebuilt into the real one;
+  # a finished overview is left alone, so steady/agg-only runs stay cheap.
+  [ -f "$overview" ] && grep -q '^provisional: true$' "$overview" && dirty=1
   for m in "${members[@]}"; do was_digested "$m" && dirty=1; done
   if [ "$dirty" -eq 0 ]; then
     echo "skip    project $proj (overview current)"
@@ -240,6 +273,7 @@ Cite real repo/path:line. Mark any link you infer rather than see stated as (inf
   if claude -p "$OPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
        && [ -f "$overview" ]; then
     echo "  ok    $proj/overview.md"
+    agg_changed=1
   else
     echo "  FAIL  $proj/overview.md"
   fi
@@ -249,9 +283,13 @@ done
 # Edges BETWEEN project families (the architecturally significant ones). Built
 # only when >=2 projects exist and something changed (or it's missing).
 conn="$KNOW_DIR/connections.md"
-if [ "$projects_total" -ge 2 ] && { [ "$digested" -gt 0 ] || [ ! -f "$conn" ]; }; then
+if [ "$projects_total" -ge 2 ] \
+     && { [ "$digested" -gt 0 ] || [ ! -f "$conn" ] || [ "$FORCE" -eq 1 ] \
+          || [ "$agg_changed" -eq 1 ]; }; then
   echo "connect  synthesizing cross-project graph across $projects_total projects ..."
-  CPROMPT="You are mapping how an organization's PROJECTS connect, for a code librarian. The projects (each a family of repos sharing a name prefix) are: $(for p in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do printf '%s [%s], ' "$p" "${PROJ_MEMBERS[$p]}"; done). Read each project's overview at .knowledge/<project>/overview.md when present, and per-repo maps under .knowledge/*/index.md (rely on these curated maps and their pointers; you need not open .repositories). Write .knowledge/connections.md, focused on edges that CROSS a project boundary (e.g. a sierra repo calling a holocron repo) — these matter most precisely because they cross families. Cover: (1) a one-line roster of the projects and what each does; (2) every cross-project edge, with direction and mechanism (HTTP endpoint, shared DB/schema, queue, model artifact, file/wire contract), cited repo/path:line from the maps; (3) the end-to-end data flow where it spans projects. Use short bullets and arrows like 'projectA/repo -> projectB/repo: mechanism'. If no cross-project edges exist, say so plainly and just give the roster. Mark inferred links (inferred). Begin with '# Cross-project connections', a blank line, then '_Last built: ${DATE}_'. Write ONLY .knowledge/connections.md."
+  # Read the already-distilled project OVERVIEWS, not the raw per-repo maps. This
+  # keeps the input O(projects), not O(repos), so it stays tractable at ~100 repos.
+  CPROMPT="You are mapping how an organization's PROJECTS connect, for a code librarian. The projects (each a family of repos sharing a name prefix) are: $(for p in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do printf '%s [%s], ' "$p" "${PROJ_MEMBERS[$p]}"; done). Read each project's distilled overview at .knowledge/<project>/overview.md; for a single-repo project that has no overview, read that one repo's map .knowledge/<repo>/index.md instead. Rely on these distilled docs and their cited pointers — do NOT crawl every per-repo map or open .repositories; the overviews already name each project's shared contracts. Write .knowledge/connections.md, focused on edges that CROSS a project boundary (e.g. a sierra repo calling a holocron repo) — these matter most precisely because they cross families. Cover: (1) a one-line roster of the projects and what each does; (2) every cross-project edge, with direction and mechanism (HTTP endpoint, shared DB/schema, queue, model artifact, file/wire contract), cited repo/path:line as surfaced by the overviews; (3) the end-to-end data flow where it spans projects. Use short bullets and arrows like 'projectA/repo -> projectB/repo: mechanism'. If no cross-project edges exist, say so plainly and just give the roster. Mark inferred links (inferred). Begin with '# Cross-project connections', a blank line, then '_Last built: ${DATE}_'. Write ONLY .knowledge/connections.md."
   if claude -p "$CPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
        && [ -f "$conn" ]; then
     echo "  ok    connections.md"
