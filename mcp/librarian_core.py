@@ -35,6 +35,7 @@ def _find_root(start):
 
 ROOT_DIR = _find_root(Path(__file__).resolve().parent)
 REPOS_DIR = ROOT_DIR / ".repositories"
+KNOW_DIR = ROOT_DIR / ".knowledge"            # curated maps, built by utils/digest.sh
 LOG_DIR = ROOT_DIR / ".logs"
 LOG_FILE = LOG_DIR / "librarian.log"          # concise one-line-per-call audit
 FEED_FILE = LOG_DIR / "librarian-feed.log"    # live trace of Claude's steps (tail -f in tmux)
@@ -132,6 +133,35 @@ def _render_event(evt):
     return None
 
 
+# --- knowledge base helpers --------------------------------------------------
+
+def _map_path(repo):
+    """Path to a repo's curated map, or None if the name is unsafe/absent."""
+    repo = (repo or "").strip().strip("/")
+    if not repo or "/" in repo or repo.startswith("."):
+        return None
+    return KNOW_DIR / repo / "index.md"
+
+
+def _map_summary(repo):
+    """The one-line `summary:` from a repo's map frontmatter, or '' if none."""
+    p = _map_path(repo)
+    if not p or not p.is_file():
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:           # scan only within the frontmatter block
+        if line.strip() == "---":
+            break
+        if line.startswith("summary:"):
+            return line[len("summary:"):].strip()
+    return ""
+
+
 # --- tools: each returns a text string --------------------------------------
 
 def list_repositories():
@@ -151,13 +181,81 @@ def list_repositories():
                                    capture_output=True, text=True, timeout=10).stdout.strip()
                 d = subprocess.run(["git", "-C", str(p), "log", "-1", "--format=%cI"],
                                    capture_output=True, text=True, timeout=10).stdout.strip()
-                lines.append(f"{p.name}  @{h}  (last commit {d})")
+                head = f"{p.name}  @{h}  (last commit {d})"
             except Exception:
-                lines.append(f"{p.name}  (git info unavailable)")
+                head = f"{p.name}  (git info unavailable)"
         else:
-            lines.append(f"{p.name}  (not a git repo)")
+            head = f"{p.name}  (not a git repo)"
+        # Append the curated one-liner so callers can pick a repo without a query.
+        summary = _map_summary(p.name)
+        lines.append(f"{head}\n    {summary}" if summary else head)
+    mapped = sum(1 for p in repos if _map_summary(p.name))
+    hint = ("" if mapped == len(repos)
+            else f"\n\n({mapped}/{len(repos)} have a knowledge-base map; "
+                 "run utils/digest.sh to build the rest.)")
     _log("list_repositories", "ok", _now() - t0, f"{len(repos)} repos")
-    return f"{len(repos)} repositories in the mirror:\n" + "\n".join(lines)
+    return f"{len(repos)} repositories in the mirror:\n" + "\n".join(lines) + hint
+
+
+def read_repo_map(repo=None):
+    """Return a curated knowledge-base map: the top-level index when no repo is
+    named, or a single repo's map. Cheap — pre-distilled, no Claude turn."""
+    t0 = _now()
+    if not repo:
+        idx = KNOW_DIR / "index.md"
+        if not idx.is_file():
+            _log("read_repo_map", "ok", _now() - t0, "no index")
+            return ("No knowledge base yet — run utils/digest.sh (or the sync loop) "
+                    "to build .knowledge/. Use list_repositories meanwhile.")
+        _log("read_repo_map", "ok", _now() - t0, "index")
+        return idx.read_text(encoding="utf-8")
+
+    p = _map_path(repo)
+    if p is None:
+        _log("read_repo_map", "error", _now() - t0, f"bad name {repo!r}")
+        return f"error: invalid repo name {repo!r}."
+    if not p.is_file():
+        names = sorted(d.name for d in KNOW_DIR.iterdir() if d.is_dir()) \
+            if KNOW_DIR.is_dir() else []
+        avail = (" Available maps: " + ", ".join(names)) if names else ""
+        _log("read_repo_map", "ok", _now() - t0, f"no map {repo}")
+        return (f"No map for '{repo}' yet (run utils/digest.sh to build it)."
+                f"{avail}")
+    _log("read_repo_map", "ok", _now() - t0, repo)
+    return p.read_text(encoding="utf-8")
+
+
+def read_repo_history(repo):
+    """Return a repo's decision log: a reverse-chronological record, mined from
+    git history, of what changed and why. Cheap — pre-distilled, no Claude turn."""
+    t0 = _now()
+    if not repo:
+        _log("read_repo_history", "error", _now() - t0, "no repo")
+        return "error: 'repo' is required (see list_repositories)."
+    base = _map_path(repo)
+    if base is None:
+        _log("read_repo_history", "error", _now() - t0, f"bad name {repo!r}")
+        return f"error: invalid repo name {repo!r}."
+    p = base.with_name("decisions.md")
+    if not p.is_file():
+        _log("read_repo_history", "ok", _now() - t0, f"no log {repo}")
+        return (f"No decision log for '{repo}' yet — it is appended as the sync loop "
+                "picks up new commits (run utils/digest.sh to seed it now).")
+    _log("read_repo_history", "ok", _now() - t0, repo)
+    return p.read_text(encoding="utf-8")
+
+
+def read_connections():
+    """Return the cross-repo integration graph: who calls whom, shared contracts,
+    and the end-to-end data flow across repos. Cheap — no Claude turn."""
+    t0 = _now()
+    p = KNOW_DIR / "connections.md"
+    if not p.is_file():
+        _log("read_connections", "ok", _now() - t0, "absent")
+        return ("No cross-repo connections graph yet — it is built once at least two "
+                "repos have maps (run utils/digest.sh). Use list_repositories meanwhile.")
+    _log("read_connections", "ok", _now() - t0, "ok")
+    return p.read_text(encoding="utf-8")
 
 
 def search_code(pattern, repos=None):
@@ -290,8 +388,53 @@ TOOLS = [
     {
         "name": "list_repositories",
         "description": (
-            "List the repositories currently in the mirror, each with its last commit. Cheap "
-            "(no Claude turn). Use to discover coverage before asking."
+            "List the repositories in the mirror, each with its last commit and a one-line "
+            "summary from its knowledge-base map. Cheap (no Claude turn). Use to discover "
+            "coverage and pick a repo before asking; then read_repo_map for that repo's detail."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_repo_map",
+        "description": (
+            "Return a curated, pre-distilled map of the codebase: with no argument, the "
+            "top-level index of all repos; with a repo name, that repo's overview — purpose, "
+            "entry points, key components, APIs/contracts, where docs live, and gotchas, each "
+            "with repo/path:line pointers. Cheap (no Claude turn). Read this FIRST to orient "
+            "and locate the right files, then search_code/ask_librarian to dig in."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "Optional repo name (see list_repositories). Omit for the top-level index."},
+            },
+        },
+    },
+    {
+        "name": "read_repo_history",
+        "description": (
+            "Return a repo's decision log: a reverse-chronological, pre-distilled record of "
+            "what changed and WHY, mined from its git history (newest first). Cheap (no Claude "
+            "turn). Use for 'why does it work this way', 'when/why did X change', 'what changed "
+            "recently' — questions about evolution and rationale, not current structure."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {"type": "string",
+                         "description": "Repo name (see list_repositories)."},
+            },
+            "required": ["repo"],
+        },
+    },
+    {
+        "name": "read_connections",
+        "description": (
+            "Return the cross-repo integration graph: which repo calls/depends on which and "
+            "how, the shared contracts/schemas (with repo/path:line), and the end-to-end data "
+            "flow across the system. Cheap (no Claude turn). Use FIRST for any question that "
+            "spans repos or asks how one service's output reaches another."
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },

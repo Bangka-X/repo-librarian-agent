@@ -20,6 +20,9 @@ import librarian_core as core  # noqa: E402
 DISPATCH = {
     "ask_librarian": lambda a: core.ask_librarian(a.get("question"), a.get("repos")),
     "list_repositories": lambda a: core.list_repositories(),
+    "read_repo_map": lambda a: core.read_repo_map(a.get("repo")),
+    "read_repo_history": lambda a: core.read_repo_history(a.get("repo")),
+    "read_connections": lambda a: core.read_connections(),
     "search_code": lambda a: core.search_code(a.get("pattern"), a.get("repos")),
 }
 

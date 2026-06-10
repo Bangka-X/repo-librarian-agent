@@ -57,9 +57,38 @@ def ask_librarian(question: str, repos: list[str] | None = None) -> str:
 
 @mcp.tool()
 def list_repositories() -> str:
-    """List the repositories currently in the mirror, each with its last commit. Cheap
-    (no Claude turn). Use to discover coverage before asking."""
+    """List the repositories in the mirror, each with its last commit and a one-line summary
+    from its knowledge-base map. Cheap (no Claude turn). Use to discover coverage and pick a
+    repo before asking; then read_repo_map for that repo's detail."""
     return core.list_repositories()
+
+
+@mcp.tool()
+def read_repo_map(repo: str | None = None) -> str:
+    """Return a curated, pre-distilled map of the codebase: with no argument, the top-level
+    index of all repos; with a repo name, that repo's overview — purpose, entry points, key
+    components, APIs/contracts, where docs live, and gotchas, each with repo/path:line
+    pointers. Cheap (no Claude turn). Read this FIRST to orient and locate the right files,
+    then search_code/ask_librarian to dig in."""
+    return core.read_repo_map(repo)
+
+
+@mcp.tool()
+def read_repo_history(repo: str) -> str:
+    """Return a repo's decision log: a reverse-chronological, pre-distilled record of what
+    changed and WHY, mined from its git history (newest first). Cheap (no Claude turn). Use
+    for 'why does it work this way', 'when/why did X change', 'what changed recently' —
+    questions about evolution and rationale, not current structure."""
+    return core.read_repo_history(repo)
+
+
+@mcp.tool()
+def read_connections() -> str:
+    """Return the cross-repo integration graph: which repo calls/depends on which and how, the
+    shared contracts/schemas (with repo/path:line), and the end-to-end data flow across the
+    system. Cheap (no Claude turn). Use FIRST for any question that spans repos or asks how one
+    service's output reaches another."""
+    return core.read_connections()
 
 
 @mcp.tool()
