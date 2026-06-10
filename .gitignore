@@ -1,0 +1,26 @@
+# Mirrored org repositories — local mirror, never committed
+repositories/
+
+# Claude Code local state
+.claude/
+
+# Secrets & credentials — never commit auth tokens or keys
+.env
+.env.*
+*.pem
+*.key
+.netrc
+
+# Logs & runtime output
+*.log
+logs/
+
+# OS cruft
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
