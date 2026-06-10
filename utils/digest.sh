@@ -79,6 +79,21 @@ for repo_path in "$REPOS_DIR"/*/; do
   name="$(basename "$repo_path")"
   [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
 
+  proj="$(project_of "$name")"
+  # How many mirrored repos share this project? Only multi-repo projects get an
+  # overview, so only then do we ask the map to link up to it.
+  proj_members=0
+  for _rp in "$REPOS_DIR"/*/; do
+    [ -d "${_rp}.git" ] || continue
+    [ "$(project_of "$(basename "$_rp")")" = "$proj" ] && proj_members=$((proj_members + 1))
+  done
+  if [ "$proj_members" -ge 2 ]; then
+    uplink="
+Then a single line linking up to the family: Part of project **${proj}** — [project overview](../${proj}/overview.md)."
+  else
+    uplink=""
+  fi
+
   sha="$(git -C "$repo_path" rev-parse --short HEAD 2>/dev/null)" || sha="unknown"
   kdir="$KNOW_DIR/$name"
   kfile="$kdir/index.md"
@@ -129,10 +144,12 @@ ${commits}"
 TASK 1 — Repository map. Write .knowledge/${name}/index.md. It MUST begin with this exact YAML frontmatter, filling in the summary:
 ---
 repo: ${name}
+project: ${proj}
 commit: ${sha}
 indexed: ${DATE}
 summary: ONE sentence (max 120 chars) describing what this repo is and does
 ---
+Then '# ${name}' as the H1 title, so the note reads cleanly in a markdown/Obsidian viewer.${uplink}
 Then a markdown body with these sections, in order:
 ## Purpose - one short paragraph.
 ## Stack - languages, frameworks, notable dependencies.
@@ -212,9 +229,10 @@ project: ${proj}
 built: ${DATE}
 summary: ONE sentence (max 120 chars) on what the ${proj} project does as a whole
 ---
+Then '# ${proj} — project overview' as the H1 title, so the note reads cleanly in a markdown/Obsidian viewer.
 Then these sections, in order:
 ## Purpose - one paragraph: what this family of repos does together.
-## Repos and roles - one bullet per member: '**<repo>** - its role in the project', linking its map as [map](<repo>/index.md).
+## Repos and roles - one bullet per member: '**<repo>** - its role in the project', linking its map with a relative path as [map](../<repo>/index.md) (the overview sits one directory deeper than the repo maps, so the '../' prefix is required for the link to resolve).
 ## End-to-end flow - how data/control moves THROUGH the project, member to member, start to finish. Short bullets with arrows like '<repoA> -> <repoB>: mechanism (HTTP endpoint / shared DB / queue / model artifact / file contract)'. Cite repo/path:line from the maps.
 ## Shared contracts - the schemas, endpoints, queues, env/config that members share with each other, each cited repo/path:line, naming which member produces and which consumes.
 ## Gotchas - cross-cutting footguns spanning the project.
