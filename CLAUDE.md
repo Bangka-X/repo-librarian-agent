@@ -24,16 +24,27 @@ keeps the mirror fresh by cloning/pulling each one. **Do not modify anything und
 
 A curated, Claude-generated map of the mirror lives in `.knowledge/`. Start there:
 
-- `.knowledge/index.md` — every repo with a one-line summary; use it to pick repos.
+- `.knowledge/index.md` — every repo with a one-line summary, **grouped by
+  project**; use it to pick a project or repo.
+- `.knowledge/<project>/overview.md` — the **project overview** for a family of
+  repos that share a name prefix (`sierra_*`, `holocron-*` → projects `sierra`,
+  `holocron`): each member's role, the end-to-end flow and shared contracts
+  *within* the family. Read this **first** when a question is scoped to a
+  project — it orients across the whole family before you drill into one repo.
 - `.knowledge/<repo>/index.md` — that repo's map: purpose, entry points, key
   components, APIs/contracts, where docs live, gotchas — each with a
   `repo/path:line` pointer into the source.
 - `.knowledge/<repo>/decisions.md` — a reverse-chronological decision log mined
   from git history: what changed and **why**. Read this for "why does it work
   this way / when did X change / what changed recently" questions.
-- `.knowledge/connections.md` — the cross-repo integration graph (who calls whom,
-  shared contracts, end-to-end data flow). Read this **first** for any question
-  that spans repos.
+- `.knowledge/connections.md` — the **cross-project** integration graph (edges
+  that cross a project boundary, shared contracts, data flow). Read this for any
+  question that spans projects.
+
+**Projects.** Repos belong to a high-level project given by their name prefix
+(before the first `_` or `-`). Callers may pass a `project` code to
+`ask_librarian` — when they do, start from that project's overview and member
+repos before looking elsewhere.
 
 Use these maps to **locate** the right files fast, then **confirm in
 `.repositories/`** and cite the real source line. The maps are a derived index,

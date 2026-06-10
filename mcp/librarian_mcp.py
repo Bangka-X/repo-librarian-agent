@@ -18,8 +18,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import librarian_core as core  # noqa: E402
 
 DISPATCH = {
-    "ask_librarian": lambda a: core.ask_librarian(a.get("question"), a.get("repos")),
+    "ask_librarian": lambda a: core.ask_librarian(a.get("question"), a.get("repos"), a.get("project")),
     "list_repositories": lambda a: core.list_repositories(),
+    "read_project_map": lambda a: core.read_project_map(a.get("project")),
     "read_repo_map": lambda a: core.read_repo_map(a.get("repo")),
     "read_repo_history": lambda a: core.read_repo_history(a.get("repo")),
     "read_connections": lambda a: core.read_connections(),

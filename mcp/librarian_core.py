@@ -12,6 +12,7 @@ observability whether the server runs locally or on a VM.
 """
 
 import os
+import re
 import json
 import shutil
 import threading
@@ -162,6 +163,40 @@ def _map_summary(repo):
     return ""
 
 
+def _project_of(name):
+    """Project code = the prefix before the first '_' or '-' delimiter. Repos in
+    the org share a high-level project code (e.g. sierra_crawler-tiktok and
+    sierra_sml-harvest-agent both belong to 'sierra'); the delimiter may be
+    either '_' or '-', so we split on whichever comes first."""
+    return re.split(r"[_-]", (name or "").strip(), maxsplit=1)[0]
+
+
+def _mapped_repos():
+    """Names of repos that have a curated map (a .knowledge/<repo>/index.md)."""
+    if not KNOW_DIR.is_dir():
+        return []
+    return sorted(d.name for d in KNOW_DIR.iterdir()
+                  if d.is_dir() and (d / "index.md").is_file())
+
+
+def _projects():
+    """Map of project code -> sorted member repo names, over mapped repos."""
+    groups = {}
+    for name in _mapped_repos():
+        groups.setdefault(_project_of(name), []).append(name)
+    for members in groups.values():
+        members.sort()
+    return groups
+
+
+def _overview_path(project):
+    """Path to a project's synthesized overview, or None if the name is unsafe."""
+    project = (project or "").strip().strip("/")
+    if not project or "/" in project or project.startswith("."):
+        return None
+    return KNOW_DIR / project / "overview.md"
+
+
 # --- tools: each returns a text string --------------------------------------
 
 def list_repositories():
@@ -169,12 +204,12 @@ def list_repositories():
     if not REPOS_DIR.is_dir():
         _log("list_repositories", "error", _now() - t0, "no mirror dir")
         return "error: mirror directory .repositories/ not found."
-    repos = sorted(p for p in REPOS_DIR.iterdir() if p.is_dir())
+    repos = sorted((p for p in REPOS_DIR.iterdir() if p.is_dir()), key=lambda p: p.name)
     if not repos:
         _log("list_repositories", "ok", _now() - t0, "empty")
         return "Mirror is empty — no repositories cloned yet."
-    lines = []
-    for p in repos:
+
+    def describe(p):
         if (p / ".git").exists():
             try:
                 h = subprocess.run(["git", "-C", str(p), "rev-parse", "--short", "HEAD"],
@@ -188,13 +223,29 @@ def list_repositories():
             head = f"{p.name}  (not a git repo)"
         # Append the curated one-liner so callers can pick a repo without a query.
         summary = _map_summary(p.name)
-        lines.append(f"{head}\n    {summary}" if summary else head)
+        return f"  {head}\n      {summary}" if summary else f"  {head}"
+
+    # Group by project code so a caller can scope a question to one family.
+    groups = {}
+    for p in repos:
+        groups.setdefault(_project_of(p.name), []).append(p)
+
+    blocks = []
+    for proj in sorted(groups):
+        members = groups[proj]
+        has_overview = _overview_path(proj) and _overview_path(proj).is_file()
+        tag = "  [project overview available]" if has_overview else ""
+        body = "\n".join(describe(p) for p in members)
+        blocks.append(f"project {proj}  ({len(members)} repo(s)){tag}\n{body}")
+
     mapped = sum(1 for p in repos if _map_summary(p.name))
     hint = ("" if mapped == len(repos)
             else f"\n\n({mapped}/{len(repos)} have a knowledge-base map; "
                  "run utils/digest.sh to build the rest.)")
-    _log("list_repositories", "ok", _now() - t0, f"{len(repos)} repos")
-    return f"{len(repos)} repositories in the mirror:\n" + "\n".join(lines) + hint
+    header = (f"{len(repos)} repositories across {len(groups)} project(s). Pass a "
+              "project code to ask_librarian/read_project_map to scope a question.\n\n")
+    _log("list_repositories", "ok", _now() - t0, f"{len(repos)} repos / {len(groups)} projects")
+    return header + "\n\n".join(blocks) + hint
 
 
 def read_repo_map(repo=None):
@@ -223,6 +274,39 @@ def read_repo_map(repo=None):
                 f"{avail}")
     _log("read_repo_map", "ok", _now() - t0, repo)
     return p.read_text(encoding="utf-8")
+
+
+def read_project_map(project):
+    """Return a project's synthesized overview: what the family of repos does, the
+    role of each member, the end-to-end flow and shared contracts within the
+    project. Cheap — pre-distilled, no Claude turn. The right FIRST read when a
+    question is scoped to a project code."""
+    t0 = _now()
+    if not project:
+        _log("read_project_map", "error", _now() - t0, "no project")
+        return "error: 'project' is required (see list_repositories for project codes)."
+    p = _overview_path(project)
+    if p is None:
+        _log("read_project_map", "error", _now() - t0, f"bad name {project!r}")
+        return f"error: invalid project code {project!r}."
+    members = _projects().get(project, [])
+    if p.is_file():
+        _log("read_project_map", "ok", _now() - t0, project)
+        return p.read_text(encoding="utf-8")
+    # No synthesized overview. A single-repo project IS its repo map; fall back.
+    if len(members) == 1:
+        _log("read_project_map", "ok", _now() - t0, f"{project} (single-repo fallback)")
+        return (f"Project '{project}' is a single repository; see its map:\n\n"
+                + read_repo_map(members[0]))
+    if members:
+        listing = "\n".join(f"  - {m}: {_map_summary(m) or '(no summary)'}" for m in members)
+        _log("read_project_map", "ok", _now() - t0, f"{project} (no overview)")
+        return (f"No synthesized overview for project '{project}' yet (run "
+                f"utils/digest.sh to build it). Its {len(members)} member repos:\n"
+                f"{listing}\n\nUse read_repo_map on any of these meanwhile.")
+    avail = ", ".join(sorted(_projects())) or "(none)"
+    _log("read_project_map", "ok", _now() - t0, f"no project {project}")
+    return f"No project '{project}' in the knowledge base. Known projects: {avail}."
 
 
 def read_repo_history(repo):
@@ -297,7 +381,7 @@ def search_code(pattern, repos=None):
     return f"{len(lines)} match(es) for '{pattern}':\n" + "\n".join(shown) + note
 
 
-def ask_librarian(question, repos=None):
+def ask_librarian(question, repos=None, project=None):
     t0 = _now()
     question = (question or "").strip()
     if not question:
@@ -307,16 +391,33 @@ def ask_librarian(question, repos=None):
         return "error: the 'claude' CLI is not on PATH."
 
     repos = repos or []
-    prompt = question
+    project = (project or "").strip()
+
+    # Build a context preamble. A project code is a soft scope hint: point the
+    # sub-agent at that family's overview and members first, but don't forbid
+    # reaching into other repos if the answer needs it. Explicit `repos` is a
+    # harder limit.
+    preamble = ""
+    if project:
+        members = _projects().get(project, [])
+        scope = (f" Its member repos: {', '.join(members)}." if members else "")
+        preamble += (
+            f"The agent asking is working on the '{project}' project. Start from that "
+            f"project's curated overview at .knowledge/{project}/overview.md, then its "
+            f"member repos' maps under .knowledge/{project}_*/ — they are the most "
+            f"likely place for the answer.{scope} Consult other repos only if the "
+            f"answer clearly lies outside this project.\n\n")
     if repos:
-        prompt = f"Limit your search to these repositories: {', '.join(repos)}.\n\n{question}"
+        preamble += f"Limit your search to these repositories: {', '.join(repos)}.\n\n"
+    prompt = f"{preamble}{question}" if preamble else question
 
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)  # force subscription auth (no metered API)
 
-    detail = f"repos={repos or 'all'} q={question[:120]!r}"
+    scope_label = f"project={project}" if project else f"repos={repos or 'all'}"
+    detail = f"{scope_label} q={question[:120]!r}"
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
-    _feed(f"\n┌─ {ts}  ask_librarian  (repos={repos or 'all'})")
+    _feed(f"\n┌─ {ts}  ask_librarian  ({scope_label})")
     _feed(f"│  Q: {question}")
 
     # Stream Claude's real steps so a tmux watcher can see the work live, while
@@ -373,14 +474,19 @@ TOOLS = [
             "Ask a natural-language question about the organization's repositories and get a "
             "synthesized answer with citations (repo/path/file:line). Use for explanations, an "
             "API/contract, how something works, or anything spanning repos. Costs a Claude turn; "
-            "to just locate code, prefer search_code."
+            "to just locate code, prefer search_code. If you know the project code you're working "
+            "on (e.g. 'sierra', 'holocron'), pass it as `project` to scope and speed up the answer."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "question": {"type": "string", "description": "The question to answer."},
+                "project": {"type": "string",
+                            "description": "Optional project code (prefix shared by a family of repos, "
+                                           "e.g. 'sierra'). Points the librarian at that project's "
+                                           "overview and member repos first. See list_repositories."},
                 "repos": {"type": "array", "items": {"type": "string"},
-                          "description": "Optional: limit to these repo names (see list_repositories)."},
+                          "description": "Optional: hard-limit the search to these repo names (see list_repositories)."},
             },
             "required": ["question"],
         },
@@ -388,11 +494,30 @@ TOOLS = [
     {
         "name": "list_repositories",
         "description": (
-            "List the repositories in the mirror, each with its last commit and a one-line "
-            "summary from its knowledge-base map. Cheap (no Claude turn). Use to discover "
-            "coverage and pick a repo before asking; then read_repo_map for that repo's detail."
+            "List the repositories in the mirror, GROUPED BY PROJECT CODE, each with its last "
+            "commit and a one-line summary from its knowledge-base map. Cheap (no Claude turn). "
+            "Use to discover the project codes and coverage, then read_project_map for a family "
+            "or read_repo_map for one repo, then ask scoped with `project`."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_project_map",
+        "description": (
+            "Return a project's synthesized overview: what the family of repos does, each "
+            "member's role, the end-to-end flow and shared contracts WITHIN the project, with "
+            "repo/path:line pointers. Cheap (no Claude turn). Read this FIRST when a question is "
+            "scoped to a project code (e.g. 'sierra') — it orients across the whole family before "
+            "you drill into one repo with read_repo_map."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string",
+                            "description": "Project code (prefix shared by a family of repos; see list_repositories)."},
+            },
+            "required": ["project"],
+        },
     },
     {
         "name": "read_repo_map",

@@ -11,9 +11,13 @@
 #                                   history. Each sync APPENDS one entry distilled
 #                                   from the commits/diff since the last digest —
 #                                   what changed and why.
-#   .knowledge/connections.md       cross-repo INTEGRATION GRAPH (who calls whom,
-#                                   shared contracts, data flow). Rebuilt from all
-#                                   maps whenever anything changed.
+#   .knowledge/<project>/overview.md  per-PROJECT OVERVIEW for a family of repos
+#                                   sharing a name prefix (sierra_*, holocron-*):
+#                                   roles, intra-project flow, shared contracts.
+#                                   The unit a question is usually scoped to.
+#   .knowledge/connections.md       cross-PROJECT INTEGRATION GRAPH (edges that
+#                                   cross a project boundary, shared contracts,
+#                                   data flow). Rebuilt whenever anything changed.
 #
 # The librarian reads these first (cheap, pre-distilled) before diving into the
 # raw mirror, then confirms against source before answering.
@@ -40,6 +44,12 @@ DATE="$(date +%F)"
 
 MAP_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Write"
 
+# Project code = the repo-name prefix before the first '_' or '-' delimiter.
+# Repos in the org share a high-level project code (sierra_crawler-tiktok and
+# sierra_sml-harvest-agent both belong to 'sierra'); the delimiter is not fixed,
+# so we split on whichever of '_' or '-' comes first.
+project_of() { printf '%s\n' "${1%%[_-]*}"; }
+
 FORCE=0
 ONLY=""
 for arg in "$@"; do
@@ -62,6 +72,7 @@ mkdir -p "$KNOW_DIR"
 
 digested=0 skipped=0 failed=0
 failed_names=()
+digested_names=()
 
 for repo_path in "$REPOS_DIR"/*/; do
   [ -d "${repo_path}.git" ] || continue
@@ -151,7 +162,7 @@ Write ONLY these two files (.knowledge/${name}/index.md and .knowledge/${name}/.
     fi
     rm -f "$pending"
     echo "  ok    $name"
-    digested=$((digested + 1))
+    digested=$((digested + 1)); digested_names+=("$name")
   else
     rm -f "$pending"
     echo "  FAIL  $name (no map written)"
@@ -159,14 +170,70 @@ Write ONLY these two files (.knowledge/${name}/index.md and .knowledge/${name}/.
   fi
 done
 
-# --- Cross-repo connections graph (second pass) -----------------------------
-# Synthesize how the repos integrate, from the per-repo maps. Rebuilt only when
-# something changed (or it's missing), and only if there are >=2 maps to relate.
+# --- Group mapped repos by project code -------------------------------------
+# The repo-name prefix (before the first '_' or '-') is the high-level project a
+# family of repos belongs to. We synthesize one overview per multi-repo project
+# (the unit a question is usually scoped to) and a cross-PROJECT graph on top.
+declare -A PROJ_MEMBERS
+for f in "$KNOW_DIR"/*/index.md; do
+  [ -f "$f" ] || continue
+  rname="$(basename "$(dirname "$f")")"
+  PROJ_MEMBERS["$(project_of "$rname")"]+="$rname "
+done
+projects_total=${#PROJ_MEMBERS[@]}
+
+was_digested() {  # true if repo $1 was (re)digested this run
+  local q="$1" d
+  for d in "${digested_names[@]:-}"; do [ "$d" = "$q" ] && return 0; done
+  return 1
+}
+
+# --- Per-project overview (one synthesis per multi-repo family) --------------
+# A project's overview is rebuilt only when a member changed (or it's missing),
+# so a quiet project costs nothing. Single-repo projects need no overview — that
+# repo's own map already serves; read_project_map falls back to it.
+for proj in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do
+  members=(${PROJ_MEMBERS[$proj]})
+  [ "${#members[@]}" -ge 2 ] || continue
+  overview="$KNOW_DIR/$proj/overview.md"
+  dirty=0
+  [ "$FORCE" -eq 1 ] && dirty=1
+  [ -f "$overview" ] || dirty=1
+  for m in "${members[@]}"; do was_digested "$m" && dirty=1; done
+  if [ "$dirty" -eq 0 ]; then
+    echo "skip    project $proj (overview current)"
+    continue
+  fi
+  echo "project  $proj — synthesizing overview from ${#members[@]} member maps ..."
+  mkdir -p "$KNOW_DIR/$proj"
+  OPROMPT="You are a code librarian writing the OVERVIEW for the '${proj}' project — a family of repositories sharing the '${proj}' name prefix. Its member repos and their curated maps are: $(for m in "${members[@]}"; do printf '%s (.knowledge/%s/index.md), ' "$m" "$m"; done). Read those maps (rely on them and their cited repo/path:line pointers; you need not open .repositories). Write .knowledge/${proj}/overview.md, the whiteboard view a senior dev draws to explain the whole '${proj}' system. Begin with this exact frontmatter:
+---
+project: ${proj}
+built: ${DATE}
+summary: ONE sentence (max 120 chars) on what the ${proj} project does as a whole
+---
+Then these sections, in order:
+## Purpose - one paragraph: what this family of repos does together.
+## Repos and roles - one bullet per member: '**<repo>** - its role in the project', linking its map as [map](<repo>/index.md).
+## End-to-end flow - how data/control moves THROUGH the project, member to member, start to finish. Short bullets with arrows like '<repoA> -> <repoB>: mechanism (HTTP endpoint / shared DB / queue / model artifact / file contract)'. Cite repo/path:line from the maps.
+## Shared contracts - the schemas, endpoints, queues, env/config that members share with each other, each cited repo/path:line, naming which member produces and which consumes.
+## Gotchas - cross-cutting footguns spanning the project.
+Cite real repo/path:line. Mark any link you infer rather than see stated as (inferred). Dense, a map not a transcript. Write ONLY .knowledge/${proj}/overview.md."
+  if claude -p "$OPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
+       && [ -f "$overview" ]; then
+    echo "  ok    $proj/overview.md"
+  else
+    echo "  FAIL  $proj/overview.md"
+  fi
+done
+
+# --- Cross-PROJECT connections graph ----------------------------------------
+# Edges BETWEEN project families (the architecturally significant ones). Built
+# only when >=2 projects exist and something changed (or it's missing).
 conn="$KNOW_DIR/connections.md"
-map_count="$(find "$KNOW_DIR" -mindepth 2 -name index.md 2>/dev/null | wc -l | tr -d ' ')"
-if { [ "$digested" -gt 0 ] || [ ! -f "$conn" ]; } && [ "$map_count" -ge 2 ]; then
-  echo "connect  synthesizing cross-repo graph from $map_count maps ..."
-  CPROMPT="You are mapping how an organization's repositories connect, for a code librarian. Read every map under .knowledge/*/index.md (rely on these curated maps and their cited pointers; you need not open .repositories). Write .knowledge/connections.md describing the cross-repo integration graph. Cover: (1) which repo calls/triggers/depends on which, with direction and mechanism (HTTP endpoint, shared DB/schema, queue, model artifact, file or wire contract); (2) the shared contracts/schemas and where each side lives, cited as repo/path:line from the maps; (3) the end-to-end data flow across the pipeline, start to finish. Use short bullets and simple arrows like 'A -> B: mechanism'. This is the whiteboard diagram a senior dev draws to explain the system. Cite repo/path:line. If a link is inferred rather than explicit in the maps, mark it (inferred). Begin the file with '# Cross-repo connections', a blank line, then '_Last built: ${DATE}_'. Write ONLY .knowledge/connections.md."
+if [ "$projects_total" -ge 2 ] && { [ "$digested" -gt 0 ] || [ ! -f "$conn" ]; }; then
+  echo "connect  synthesizing cross-project graph across $projects_total projects ..."
+  CPROMPT="You are mapping how an organization's PROJECTS connect, for a code librarian. The projects (each a family of repos sharing a name prefix) are: $(for p in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do printf '%s [%s], ' "$p" "${PROJ_MEMBERS[$p]}"; done). Read each project's overview at .knowledge/<project>/overview.md when present, and per-repo maps under .knowledge/*/index.md (rely on these curated maps and their pointers; you need not open .repositories). Write .knowledge/connections.md, focused on edges that CROSS a project boundary (e.g. a sierra repo calling a holocron repo) — these matter most precisely because they cross families. Cover: (1) a one-line roster of the projects and what each does; (2) every cross-project edge, with direction and mechanism (HTTP endpoint, shared DB/schema, queue, model artifact, file/wire contract), cited repo/path:line from the maps; (3) the end-to-end data flow where it spans projects. Use short bullets and arrows like 'projectA/repo -> projectB/repo: mechanism'. If no cross-project edges exist, say so plainly and just give the roster. Mark inferred links (inferred). Begin with '# Cross-project connections', a blank line, then '_Last built: ${DATE}_'. Write ONLY .knowledge/connections.md."
   if claude -p "$CPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
        && [ -f "$conn" ]; then
     echo "  ok    connections.md"
@@ -175,32 +242,44 @@ if { [ "$digested" -gt 0 ] || [ ! -f "$conn" ]; } && [ "$map_count" -ge 2 ]; the
   fi
 fi
 
-# --- Rebuild the top-level index from each map's frontmatter -----------------
+# --- Rebuild the top-level index, grouped by project ------------------------
 # Mechanical (grep), so it never costs a Claude turn and can't drift from facts.
 index="$KNOW_DIR/index.md"
 {
   echo "# Knowledge Base"
   echo
-  echo "Curated, Claude-generated knowledge for each mirrored repo. Start here to"
-  echo "locate components, open the per-repo map or decision log, then CONFIRM in"
-  echo ".repositories/ and cite the real source line. These are derived, not truth."
+  echo "Curated, Claude-generated knowledge for the mirrored repos, grouped by"
+  echo "project. Start at a project overview to orient across a family, open a"
+  echo "per-repo map or decision log to drill in, then CONFIRM in .repositories/"
+  echo "and cite the real source line. These are derived, not truth."
   echo
   echo "_Last built: ${DATE}_"
   echo
-  [ -f "$conn" ] && echo "**Cross-repo integration graph:** [connections.md](connections.md)" && echo
-  echo "| Repo | Summary | Map | History |"
-  echo "|---|---|---|---|"
-  for f in "$KNOW_DIR"/*/index.md; do
-    [ -f "$f" ] || continue
-    rname="$(basename "$(dirname "$f")")"
-    rsum="$(sed -n 's/^summary: //p' "$f" | head -n1)"
-    [ -z "$rsum" ] && rsum="(no summary)"
-    if [ -f "$KNOW_DIR/$rname/decisions.md" ]; then
-      hist="[history]($rname/decisions.md)"
+  [ -f "$conn" ] && echo "**Cross-project integration graph:** [connections.md](connections.md)" && echo
+  for proj in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do
+    members=(${PROJ_MEMBERS[$proj]})
+    ov="$KNOW_DIR/$proj/overview.md"
+    if [ -f "$ov" ]; then
+      echo "## Project: $proj — [overview]($proj/overview.md)"
     else
-      hist="—"
+      echo "## Project: $proj"
     fi
-    echo "| $rname | $rsum | [map]($rname/index.md) | $hist |"
+    echo
+    echo "| Repo | Summary | Map | History |"
+    echo "|---|---|---|---|"
+    for rname in $(printf '%s\n' "${members[@]}" | sort); do
+      f="$KNOW_DIR/$rname/index.md"
+      [ -f "$f" ] || continue
+      rsum="$(sed -n 's/^summary: //p' "$f" | head -n1)"
+      [ -z "$rsum" ] && rsum="(no summary)"
+      if [ -f "$KNOW_DIR/$rname/decisions.md" ]; then
+        hist="[history]($rname/decisions.md)"
+      else
+        hist="—"
+      fi
+      echo "| $rname | $rsum | [map]($rname/index.md) | $hist |"
+    done
+    echo
   done
 } > "$index"
 

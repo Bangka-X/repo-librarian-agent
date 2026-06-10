@@ -47,20 +47,33 @@ mcp = FastMCP("librarian", host=HOST, port=PORT)
 
 
 @mcp.tool()
-def ask_librarian(question: str, repos: list[str] | None = None) -> str:
+def ask_librarian(question: str, project: str | None = None,
+                  repos: list[str] | None = None) -> str:
     """Ask a natural-language question about the organization's repositories and get a
     synthesized answer with citations (repo/path/file:line). Use for explanations, an
     API/contract, how something works, or anything spanning repos. Costs a Claude turn;
-    to just locate code, prefer search_code."""
-    return core.ask_librarian(question, repos)
+    to just locate code, prefer search_code. If you know the project code you're working on
+    (e.g. 'sierra', 'holocron'), pass it as `project` to scope and speed up the answer."""
+    return core.ask_librarian(question, repos, project)
 
 
 @mcp.tool()
 def list_repositories() -> str:
-    """List the repositories in the mirror, each with its last commit and a one-line summary
-    from its knowledge-base map. Cheap (no Claude turn). Use to discover coverage and pick a
-    repo before asking; then read_repo_map for that repo's detail."""
+    """List the repositories in the mirror, GROUPED BY PROJECT CODE, each with its last commit
+    and a one-line summary from its knowledge-base map. Cheap (no Claude turn). Use to discover
+    the project codes and coverage, then read_project_map for a family or read_repo_map for one
+    repo, then ask scoped with `project`."""
     return core.list_repositories()
+
+
+@mcp.tool()
+def read_project_map(project: str) -> str:
+    """Return a project's synthesized overview: what the family of repos does, each member's
+    role, the end-to-end flow and shared contracts WITHIN the project, with repo/path:line
+    pointers. Cheap (no Claude turn). Read this FIRST when a question is scoped to a project
+    code (e.g. 'sierra') — it orients across the whole family before you drill into one repo
+    with read_repo_map."""
+    return core.read_project_map(project)
 
 
 @mcp.tool()
