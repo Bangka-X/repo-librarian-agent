@@ -15,8 +15,16 @@
 .netrc
 
 # Logs & runtime output
+.logs/
 *.log
-logs/
+
+# Python (MCP server) caches & venv
+__pycache__/
+*.pyc
+.venv/
+
+# HTTP MCP server bearer token — never commit
+.librarian.token
 
 # OS cruft
 .DS_Store

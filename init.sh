@@ -73,29 +73,73 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
-# If a librarian is already running, don't start a second one.
-if tmux has-session -t "$SESSION" 2>/dev/null; then
-  echo "A '$SESSION' tmux session is already running."
-  echo "Attach with:  tmux attach -t $SESSION"
-  echo "Restart with: tmux kill-session -t $SESSION && bash init.sh $INTERVAL"
-  exit 0
+# --- 3. Start the remote MCP server (Streamable HTTP + bearer token) ---------
+# Runs in its own tmux session, independent of the sync session. Skip entirely
+# with LIBRARIAN_NO_HTTP=1. Host/port override via LIBRARIAN_HOST / LIBRARIAN_PORT.
+if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
+  HTTP_SESSION="librarian-http"
+  TOKEN_FILE="$SCRIPT_DIR/.librarian.token"
+  VENV_PY="$SCRIPT_DIR/mcp/.venv/bin/python"
+  HTTP_HOST="${LIBRARIAN_HOST:-127.0.0.1}"
+  HTTP_PORT="${LIBRARIAN_PORT:-8008}"
+
+  # Generate the bearer token once (gitignored), reused on every boot.
+  if [ ! -f "$TOKEN_FILE" ]; then
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
+    echo "Generated a bearer token at .librarian.token"
+  fi
+  TOKEN="$(cat "$TOKEN_FILE")"
+
+  # Ensure the Python venv with MCP deps exists (one-time setup).
+  if [ ! -x "$VENV_PY" ]; then
+    echo "Setting up the HTTP server venv (one-time)…"
+    if command -v uv >/dev/null 2>&1; then
+      uv venv "$SCRIPT_DIR/mcp/.venv" >/dev/null 2>&1 &&
+        uv pip install --python "$VENV_PY" -r "$SCRIPT_DIR/mcp/requirements.txt" >/dev/null 2>&1
+    else
+      python3 -m venv "$SCRIPT_DIR/mcp/.venv" >/dev/null 2>&1 &&
+        "$VENV_PY" -m pip install -q -r "$SCRIPT_DIR/mcp/requirements.txt" >/dev/null 2>&1
+    fi
+  fi
+
+  if [ ! -x "$VENV_PY" ]; then
+    echo "warning: could not set up mcp/.venv — skipping HTTP server." >&2
+  elif tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
+    echo "HTTP MCP server already running (tmux '$HTTP_SESSION')."
+  else
+    tmux new-session -d -s "$HTTP_SESSION" -c "$SCRIPT_DIR" \
+      "LIBRARIAN_TOKEN='$TOKEN' LIBRARIAN_HOST='$HTTP_HOST' LIBRARIAN_PORT='$HTTP_PORT' '$VENV_PY' '$SCRIPT_DIR/mcp/librarian_http.py'"
+    echo "HTTP MCP server started in tmux '$HTTP_SESSION' → http://$HTTP_HOST:$HTTP_PORT/mcp"
+    echo "Register a client with:"
+    echo "  claude mcp add --transport http librarian http://$HTTP_HOST:$HTTP_PORT/mcp --header \"Authorization: Bearer $TOKEN\""
+  fi
 fi
 
-# --- 3. Boot the librarian in tmux ------------------------------------------
+# --- 4. Boot the librarian sync session in tmux -----------------------------
 # NOTE: this prompt is embedded in the tmux command string, so it must contain
 # no single/double quotes or backticks (they would break shell parsing).
 BOOT_PROMPT="You are the repository librarian for this project — read CLAUDE.md first for your role and rules. Startup task before anything else: use your /loop capability to schedule the shell command bash loop.sh to run every ${INTERVAL}, which keeps the .repositories mirror fresh. Confirm the loop is scheduled, run loop.sh once now for an initial sync, then stay open and answer questions about the mirrored repositories per CLAUDE.md."
 
-# Start detached so it boots in the background, with its CWD set to the project.
-tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" \
-  "claude -n librarian \"$BOOT_PROMPT\""
-
-echo "Librarian booted in tmux session '$SESSION' (sync every ${INTERVAL})."
-
-# Attach if we have a terminal; otherwise just report how to.
-if [ -t 1 ]; then
-  echo "Attaching… (detach with Ctrl-b then d)"
-  exec tmux attach -t "$SESSION"
+if tmux has-session -t "=$SESSION" 2>/dev/null; then
+  echo "Librarian sync session already running (tmux '$SESSION')."
 else
-  echo "Attach with:  tmux attach -t $SESSION"
+  tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" \
+    "claude -n librarian \"$BOOT_PROMPT\""
+  echo "Librarian booted in tmux session '$SESSION' (sync every ${INTERVAL})."
 fi
+
+# Both sessions run DETACHED as background daemons. We deliberately do NOT
+# auto-attach: attaching would drop you into the sync session's interactive
+# Claude, where an accidental Ctrl-C/exit kills it (leaving only the HTTP one).
+echo
+echo "Librarian is up. Background tmux sessions:"
+echo "  $SESSION  — sync daemon (Claude /loop → loop.sh)"
+if [ -n "${HTTP_SESSION:-}" ] && tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
+  echo "  $HTTP_SESSION  — HTTP MCP server (http://${HTTP_HOST}:${HTTP_PORT}/mcp)"
+fi
+echo
+echo "  List:   tmux ls"
+echo "  Attach: tmux attach -t $SESSION        (detach again with Ctrl-b d)"
+echo "  Watch:  bash mcp/watch.sh              (live view of answers)"
+echo "  Stop:   tmux kill-session -t $SESSION${HTTP_SESSION:+; tmux kill-session -t $HTTP_SESSION}"
