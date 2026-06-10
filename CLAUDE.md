@@ -16,7 +16,8 @@ Every org repository is mirrored, one directory each, under `.repositories/`:
 .repositories/<repo-name>/...
 ```
 
-This is a read-only mirror kept fresh by a sync loop. **Do not modify anything under
+This is a read-only mirror. The list of repos lives in `.repos.input`, and `loop.sh`
+keeps the mirror fresh by cloning/pulling each one. **Do not modify anything under
 `.repositories/`** — never edit, commit, or push inside those repos. You only read them.
 
 ## How to answer
