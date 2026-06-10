@@ -1,65 +1,71 @@
 #!/usr/bin/env bash
 #
-# loop.sh — sync all mirrored repositories.
+# loop.sh — sync every repository listed in .repos.input.
 #
-# Walks every git repo under repositories/ and fast-forward pulls it.
-# Skips repos with uncommitted changes (never clobbers local work) and
-# repos with no upstream. Prints a per-repo result and a final summary.
+# Reads the hidden input file, then for each repo link: clones it into
+# .repositories/ if missing, or fast-forward pulls it if already there.
+# Skips repos with uncommitted changes (never clobbers local work).
 #
-# Intended to be run on a /loop interval. Safe to run repeatedly.
+# Run init.sh first to create the input file. Safe to run repeatedly — this is
+# what the /loop interval calls.
 
 set -uo pipefail
 
-# Resolve repositories/ relative to this script, so it works from any CWD.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPOS_DIR="$SCRIPT_DIR/repositories"
+REPOS_DIR="$SCRIPT_DIR/.repositories"
+INPUT_FILE="$SCRIPT_DIR/.repos.input"
 
-if [ ! -d "$REPOS_DIR" ]; then
-  echo "error: $REPOS_DIR does not exist" >&2
+if [ ! -f "$INPUT_FILE" ]; then
+  echo "error: $INPUT_FILE not found — run  bash init.sh  first" >&2
   exit 1
 fi
+mkdir -p "$REPOS_DIR"
 
-ok=0 skipped=0 failed=0
+cloned=0 pulled=0 skipped=0 failed=0
 failed_names=()
 
-# One level deep: repositories/<name>/.git
-for repo in "$REPOS_DIR"/*/; do
-  [ -d "$repo" ] || continue
-  name="$(basename "$repo")"
+while IFS= read -r line || [ -n "$line" ]; do
+  entry="$(echo "$line" | xargs)"        # trim whitespace
+  [ -z "$entry" ] && continue            # blank line
+  case "$entry" in \#*) continue ;; esac # comment
 
-  if [ ! -d "$repo/.git" ]; then
-    echo "skip   $name (not a git repo)"
-    skipped=$((skipped + 1))
-    continue
-  fi
+  # Normalize shorthand (org/repo) into an HTTPS URL.
+  case "$entry" in
+    *://*|git@*) url="$entry" ;;
+    */*)         url="https://github.com/$entry.git" ;;
+    *)
+      echo "FAIL   '$entry' (unrecognized format)"
+      failed=$((failed + 1)); failed_names+=("$entry"); continue ;;
+  esac
 
-  # Skip if the working tree is dirty — don't risk local changes.
-  if [ -n "$(git -C "$repo" status --porcelain)" ]; then
-    echo "skip   $name (uncommitted changes)"
-    skipped=$((skipped + 1))
-    continue
-  fi
+  name="$(basename "$url")"; name="${name%.git}"
+  dest="$REPOS_DIR/$name"
 
-  # Skip if the current branch has no upstream to pull from.
-  if ! git -C "$repo" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
-    echo "skip   $name (no upstream)"
-    skipped=$((skipped + 1))
-    continue
-  fi
-
-  if git -C "$repo" pull --ff-only --quiet; then
-    echo "ok     $name"
-    ok=$((ok + 1))
+  if [ -d "$dest/.git" ]; then
+    if [ -n "$(git -C "$dest" status --porcelain)" ]; then
+      echo "skip   $name (uncommitted changes)"
+      skipped=$((skipped + 1))
+    elif git -C "$dest" pull --ff-only --quiet; then
+      echo "pull   $name"
+      pulled=$((pulled + 1))
+    else
+      echo "FAIL   $name (pull failed — diverged or network)"
+      failed=$((failed + 1)); failed_names+=("$name")
+    fi
   else
-    echo "FAIL   $name (pull failed — diverged or network)"
-    failed=$((failed + 1))
-    failed_names+=("$name")
+    if git clone --quiet "$url" "$dest"; then
+      echo "clone  $name"
+      cloned=$((cloned + 1))
+    else
+      echo "FAIL   $name (clone failed)"
+      failed=$((failed + 1)); failed_names+=("$name")
+    fi
   fi
-done
+done < "$INPUT_FILE"
 
 echo "----"
-echo "synced: $ok  skipped: $skipped  failed: $failed"
+echo "cloned: $cloned  pulled: $pulled  skipped: $skipped  failed: $failed"
 if [ "$failed" -gt 0 ]; then
-  echo "failed repos: ${failed_names[*]}"
+  echo "failed: ${failed_names[*]}"
   exit 1
 fi

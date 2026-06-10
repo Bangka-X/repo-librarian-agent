@@ -10,18 +10,18 @@ codebase would.
 
 ## Where the code lives
 
-Every org repository is mirrored, one directory each, under `repositories/`:
+Every org repository is mirrored, one directory each, under `.repositories/`:
 
 ```
-repositories/<repo-name>/...
+.repositories/<repo-name>/...
 ```
 
 This is a read-only mirror kept fresh by a sync loop. **Do not modify anything under
-`repositories/`** — never edit, commit, or push inside those repos. You only read them.
+`.repositories/`** — never edit, commit, or push inside those repos. You only read them.
 
 ## How to answer
 
-1. **Search broadly first.** Use grep/glob across all of `repositories/` before reading.
+1. **Search broadly first.** Use grep/glob across all of `.repositories/` before reading.
    The answer may span multiple repos — check more than the obvious one.
 2. **Read to confirm.** Don't answer from a filename or a single match; open the file and
    verify the behavior before stating it.

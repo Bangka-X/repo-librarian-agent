@@ -1,5 +1,8 @@
 # Mirrored org repositories — local mirror, never committed
-repositories/
+.repositories/
+
+# Repo list — your input file, never committed
+.repos.input
 
 # Claude Code local state
 .claude/
