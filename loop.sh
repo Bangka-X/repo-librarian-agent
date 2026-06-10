@@ -75,9 +75,18 @@ echo "cloned: $cloned  pulled: $pulled  skipped: $skipped  failed: $failed"
 #
 # Defer while a cold-start backfill is in progress: it is already building every
 # map (in parallel) and holds the lock, so running digest.sh now would race it.
+# Consider it active if the lock pid is alive, OR (belt-and-suspenders, covering
+# the brief boot window before the pid is written) its tmux session exists.
 BACKFILL_LOCK="$SCRIPT_DIR/.knowledge/.backfill.lock"
-if [ -f "$BACKFILL_LOCK" ] \
-     && kill -0 "$(cat "$BACKFILL_LOCK" 2>/dev/null)" 2>/dev/null; then
+backfill_active() {
+  if [ -f "$BACKFILL_LOCK" ]; then
+    local pid; pid="$(cat "$BACKFILL_LOCK" 2>/dev/null || true)"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+  fi
+  tmux has-session -t "=librarian-backfill" 2>/dev/null && return 0
+  return 1
+}
+if backfill_active; then
   echo "----"
   echo "cold-start backfill in progress — deferring knowledge refresh this cycle."
 elif [ -z "${LIBRARIAN_NO_DIGEST:-}" ] && [ -f "$SCRIPT_DIR/utils/digest.sh" ]; then

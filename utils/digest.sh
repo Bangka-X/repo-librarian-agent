@@ -230,7 +230,8 @@ projects_total=${#PROJ_MEMBERS[@]}
 
 was_digested() {  # true if repo $1 was (re)digested this run
   local q="$1" d
-  for d in "${digested_names[@]:-}"; do [ "$d" = "$q" ] && return 0; done
+  [ "${#digested_names[@]}" -eq 0 ] && return 1
+  for d in "${digested_names[@]}"; do [ "$d" = "$q" ] && return 0; done
   return 1
 }
 
@@ -283,9 +284,13 @@ done
 # Edges BETWEEN project families (the architecturally significant ones). Built
 # only when >=2 projects exist and something changed (or it's missing).
 conn="$KNOW_DIR/connections.md"
+# Also rebuild when a map is newer than the graph — covers agg-only runs where no
+# overview changed (e.g. all single-repo projects) but deep maps did move.
+maps_newer=""
+[ -f "$conn" ] && maps_newer="$(find "$KNOW_DIR" -mindepth 2 -name index.md -newer "$conn" -print -quit 2>/dev/null)"
 if [ "$projects_total" -ge 2 ] \
      && { [ "$digested" -gt 0 ] || [ ! -f "$conn" ] || [ "$FORCE" -eq 1 ] \
-          || [ "$agg_changed" -eq 1 ]; }; then
+          || [ "$agg_changed" -eq 1 ] || [ -n "$maps_newer" ]; }; then
   echo "connect  synthesizing cross-project graph across $projects_total projects ..."
   # Read the already-distilled project OVERVIEWS, not the raw per-repo maps. This
   # keeps the input O(projects), not O(repos), so it stays tractable at ~100 repos.

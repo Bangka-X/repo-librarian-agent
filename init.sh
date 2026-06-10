@@ -105,7 +105,7 @@ if [ "$has_repos_listed" -gt 0 ] && [ -z "${LIBRARIAN_NO_BACKFILL:-}" ]; then
     echo "Launching staged backfill in tmux '$BACKFILL_SESSION'…"
     tmux new-session -d -s "$BACKFILL_SESSION" -c "$SCRIPT_DIR" \
       "bash '$SCRIPT_DIR/utils/backfill.sh'; echo; echo '[backfill finished — press a key to close]'; read -n 1"
-    echo "  watch it:  tmux attach -t $BACKFILL_SESSION   (detach: Ctrl-b d)"
+    echo "  watch it:  tail -f .logs/backfill.log     (or: tmux attach -t $BACKFILL_SESSION)"
   fi
 fi
 

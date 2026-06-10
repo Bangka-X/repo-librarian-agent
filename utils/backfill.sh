@@ -37,6 +37,9 @@ UTILS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$UTILS_DIR/.." && pwd)"
 REPOS_DIR="$ROOT_DIR/.repositories"
 KNOW_DIR="$ROOT_DIR/.knowledge"
+LOGS_DIR="$ROOT_DIR/.logs"
+LOG_FILE="$LOGS_DIR/backfill.log"
+PROG_DIR="$KNOW_DIR/.backfill-progress"
 DATE="$(date +%F)"
 LOCK="$KNOW_DIR/.backfill.lock"
 
@@ -70,19 +73,37 @@ fi
 # Force subscription auth (an API key would switch to metered billing).
 unset ANTHROPIC_API_KEY
 cd "$ROOT_DIR"
-mkdir -p "$KNOW_DIR"
+mkdir -p "$KNOW_DIR" "$LOGS_DIR"
 
-# --- Single-instance lock ----------------------------------------------------
+# Mirror everything to a log so progress is visible without attaching tmux:
+#   tail -f .logs/backfill.log
+exec > >(tee -a "$LOG_FILE") 2>&1
+echo "[$(date '+%F %T')] backfill starting (pid $$)"
+
+# --- Single-instance lock (written FIRST and atomically) ---------------------
+# Written early so the sync loop never sees a missing/half-written lock and races
+# us into a concurrent digest. loop.sh also checks the tmux session as a backstop.
 if [ -f "$LOCK" ]; then
   other="$(cat "$LOCK" 2>/dev/null || true)"
   if [ -n "$other" ] && kill -0 "$other" 2>/dev/null; then
-    echo "backfill already running (pid $other) — exiting." >&2
+    echo "backfill already running (pid $other) — exiting."
     exit 0
   fi
-  echo "stale backfill lock (pid ${other:-?}) — taking over." >&2
+  echo "stale backfill lock (pid ${other:-?}) — taking over."
 fi
-echo "$$" > "$LOCK"
-trap 'rm -f "$LOCK"' EXIT
+printf '%s\n' "$$" > "$LOCK.tmp" && mv -f "$LOCK.tmp" "$LOCK"
+rm -rf "$PROG_DIR"; mkdir -p "$PROG_DIR"
+trap 'rm -f "$LOCK" "$LOCK.tmp"; rm -rf "$PROG_DIR"' EXIT
+
+# --- Progress counter (tqdm-ish across parallel workers) ---------------------
+# Each worker appends one byte to a per-phase tally file; the byte count is the
+# number completed. Atomic 1-byte appends mean the running [n/total] is reliable.
+progress() {   # $1=phase  $2=total  $3=message
+  local pf="$PROG_DIR/$1"
+  printf '.' >> "$pf"
+  local n; n="$(wc -c < "$pf" 2>/dev/null || echo '?')"
+  printf '  [%s %s/%s] %s\n' "$1" "$n" "$2" "$3"
+}
 
 # --- Bounded-parallel runner: parallel_map MAX func item... ------------------
 # Runs `func item` for each item, at most MAX at a time (needs bash >=4.3 wait -n).
@@ -175,11 +196,7 @@ The line: Provisional stub from first fetch — full deep map pending.
 
 Write ONLY the .knowledge/<repo>/index.md files for the members listed above. Mark uncertainty honestly; this is an unverified first guess."
 
-  if claude_try claude -p "$APROMPT" --allowedTools "Read,Grep,Glob,Write"; then
-    echo "  ok    stubs ${proj} (${#todo[@]})"
-  else
-    echo "  FAIL  stubs ${proj}"
-  fi
+  claude_try claude -p "$APROMPT" --allowedTools "Read,Grep,Glob,Write"
 }
 
 stage_a_overview() {     # $1=project — provisional project overview
@@ -201,21 +218,20 @@ The line: Provisional — rebuilt from the deep maps once indexing completes.
 
 Write ONLY .knowledge/${proj}/overview.md. Mark uncertainty honestly."
 
-  if claude_try claude -p "$OPROMPT" --allowedTools "Read,Grep,Glob,Write" \
-       && [ -f "$KNOW_DIR/$proj/overview.md" ]; then
-    echo "  ok    overview ${proj} (provisional)"
-  else
-    echo "  FAIL  overview ${proj}"
-  fi
+  claude_try claude -p "$OPROMPT" --allowedTools "Read,Grep,Glob,Write" \
+    && [ -f "$KNOW_DIR/$proj/overview.md" ]
 }
 
 stage_a_worker() {       # $1 = 'stub|proj|csv'  or  'overview|proj|'
-  local task="$1" type payload proj
+  local task="$1" type payload proj st
   type="${task%%|*}"; payload="${task#*|}"; proj="${payload%%|*}"; payload="${payload#*|}"
   case "$type" in
     stub)     stage_a_stubs "$proj" "$payload" ;;
     overview) stage_a_overview "$proj" ;;
   esac
+  st=$?
+  [ "$st" -eq 0 ] && progress A "$A_TOTAL" "ok   ${type} ${proj}" \
+                  || progress A "$A_TOTAL" "FAIL ${type} ${proj}"
 }
 
 # Build the task list: chunked stubs for repos still missing a map, plus a
@@ -241,7 +257,8 @@ done
 if [ "${#a_tasks[@]}" -eq 0 ]; then
   echo "  (every repo already has a map — no stubs needed)"
 else
-  echo "  ${#a_tasks[@]} stub/overview task(s) across ${projects_total} project(s)"
+  A_TOTAL=${#a_tasks[@]}
+  echo "  ${A_TOTAL} stub/overview task(s) across ${projects_total} project(s)"
   parallel_map "$CONC" stage_a_worker "${a_tasks[@]}"
 fi
 
@@ -267,13 +284,14 @@ stage_b_repo() {
   local i=1
   while :; do
     if DIGEST_MAPS_ONLY=1 bash "$UTILS_DIR/digest.sh" "$1" >/dev/null 2>&1; then
-      echo "  ok    $1"; return 0
+      progress B "$B_TOTAL" "ok   $1"; return 0
     fi
-    [ "$i" -ge "$RETRIES" ] && { echo "  FAIL  $1 (after ${RETRIES} tries)"; return 1; }
+    [ "$i" -ge "$RETRIES" ] && { progress B "$B_TOTAL" "FAIL $1 (after ${RETRIES})"; return 1; }
     sleep $((i * 5)); i=$((i + 1))
   done
 }
 
+B_TOTAL=${#ordered[@]}
 parallel_map "$CONC" stage_b_repo "${ordered[@]}"
 
 # ============================================================================
@@ -298,4 +316,5 @@ echo
 echo "=============================================================="
 echo " backfill done: ${mapped}/${#repos[@]} deep-mapped, ${provisional} still provisional"
 [ "$provisional" -gt 0 ] && echo " (provisional repos will deepen on the next sync loop)"
+echo " full log: ${LOG_FILE}"
 echo "=============================================================="
