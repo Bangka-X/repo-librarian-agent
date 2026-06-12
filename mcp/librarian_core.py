@@ -41,6 +41,28 @@ LOG_DIR = ROOT_DIR / ".logs"
 LOG_FILE = LOG_DIR / "librarian.log"          # concise one-line-per-call audit
 FEED_FILE = LOG_DIR / "librarian-feed.log"    # live trace of Claude's steps (tail -f in tmux)
 
+def _config_model():
+    """Which Claude model to run the librarian on. Resolution order: an env var
+    (LIBRARIAN_MODEL) wins, else the value in librarian.conf at the repo root,
+    else 'sonnet'. Keeps the model a single, easily-edited setting shared with
+    the shell scripts. The conf line looks like:  : "${LIBRARIAN_MODEL:=sonnet}"
+    """
+    env = os.environ.get("LIBRARIAN_MODEL")
+    if env:
+        return env
+    conf = ROOT_DIR / "librarian.conf"
+    if conf.exists():
+        for line in conf.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):    # skip blanks and comments
+                continue
+            m = re.search(r'LIBRARIAN_MODEL:?=["\']?([^"\'}\s]+)', line)
+            if m:
+                return m.group(1)
+    return "sonnet"
+
+
+MODEL = _config_model()            # passed to `claude --model`
 ALLOWED_TOOLS = "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
 ASK_TIMEOUT = 300                  # seconds for a librarian query
 SEARCH_CAP = 50                    # max grep matches returned
@@ -422,7 +444,7 @@ def ask_librarian(question, repos=None, project=None):
 
     # Stream Claude's real steps so a tmux watcher can see the work live, while
     # still capturing the final answer to return to the caller.
-    cmd = ["claude", "-p", prompt, "--allowedTools", ALLOWED_TOOLS,
+    cmd = ["claude", "-p", prompt, "--model", MODEL, "--allowedTools", ALLOWED_TOOLS,
            "--verbose", "--output-format", "stream-json"]
     proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,

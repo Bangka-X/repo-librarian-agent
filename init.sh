@@ -26,6 +26,12 @@ INPUT_FILE="$SCRIPT_DIR/.repos.input"
 INTERVAL="${1:-15m}"
 SESSION="librarian"
 
+# Central settings (model selection, etc.) live in librarian.conf at the repo
+# root; an env var of the same name still wins. Sourced so the booted librarian
+# and every script it spawns run on the configured model.
+[ -f "$SCRIPT_DIR/librarian.conf" ] && . "$SCRIPT_DIR/librarian.conf"
+MODEL="${LIBRARIAN_MODEL:-sonnet}"
+
 # --- 1. Scaffold (idempotent) ------------------------------------------------
 # Create every runtime directory the librarian depends on up front, so nothing
 # downstream has to assume it exists. All three are gitignored, derived state:
@@ -161,7 +167,7 @@ if tmux has-session -t "=$SESSION" 2>/dev/null; then
   echo "Librarian sync session already running (tmux '$SESSION')."
 else
   tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" \
-    "claude -n librarian \"$BOOT_PROMPT\""
+    "claude -n librarian --model $MODEL \"$BOOT_PROMPT\""
   echo "Librarian booted in tmux session '$SESSION' (sync every ${INTERVAL})."
 fi
 
