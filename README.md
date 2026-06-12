@@ -62,6 +62,23 @@ bash stop.sh                 # stop all librarian services
 > Override the interval/host/port: `bash init.sh 5m`, `LIBRARIAN_PORT=9000 bash init.sh`,
 > or skip the HTTP server entirely with `LIBRARIAN_NO_HTTP=1 bash init.sh`.
 
+## Configuration
+
+Project-wide settings live in [`librarian.conf`](librarian.conf) at the repo root. Edit
+one line there and it applies everywhere the librarian runs — sync, cold-start backfill,
+the `ask.sh` CLI, the booted session, and the MCP tools all read it.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `LIBRARIAN_MODEL` | `sonnet` | Which Claude model the librarian runs on, passed straight to `claude --model`. Use an alias (`sonnet`, `opus`, `haiku`) or a full id (e.g. `claude-sonnet-4-6`). Sonnet is fast and economical and ample for reading the mirror; switch to `opus` for the hardest questions or richest maps. |
+
+An environment variable of the same name takes precedence, so you can override for a
+single run without editing the file:
+
+```bash
+LIBRARIAN_MODEL=opus bash utils/ask.sh "the hard cross-repo question"
+```
+
 ## Integrate with your Claude
 
 There are two transports. **For local use you're already done** — pick based on where
@@ -162,6 +179,7 @@ Both are capped at 10 MB (rolled to `.log.1`) and gitignored.
 repos-agent/
 ├── CLAUDE.md            # librarian agent system prompt
 ├── README.md           # this file
+├── librarian.conf      # project settings (model selection)
 ├── init.sh             # boot: scaffold + start the two tmux daemons
 ├── loop.sh             # sync: clone/pull every repo in .repos.input
 ├── stop.sh             # stop all librarian services
