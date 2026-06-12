@@ -9,7 +9,8 @@
 # kill, a pause, or a reboot loses no finished work.
 #
 # Stages:
-#   (opt) stubs   provisional, naming-based stub maps for breadth (BACKFILL_STUBS=1)
+#   stubs         provisional, naming-based stub maps for breadth — auto on a cold
+#                 start, or forced with BACKFILL_STUBS=1 (skip via BACKFILL_NO_STUBS=1)
 #   maps          authoritative per-repo deep maps, paced in batches, priority
 #                 ordered by last commit, run CONC-at-a-time within a batch
 #   aggregate     project overviews + cross-project graph (digest.sh agg-only)
@@ -24,7 +25,8 @@
 #   BACKFILL_BATCH=20            repos deep-mapped per cycle
 #   BACKFILL_PACE_SECONDS=7200   sleep between cycles (2h)
 #   BACKFILL_CONCURRENCY         workers within a batch (default min(cores,10))
-#   BACKFILL_STUBS=1             also write provisional stubs first (off by default)
+#   BACKFILL_STUBS=1             force the Stage A stub pass (auto-runs on cold start)
+#   BACKFILL_NO_STUBS=1          skip Stage A even on a cold start (straight to maps)
 #   BACKFILL_RETRIES=3           transient-failure retries per task
 #
 # Progress is mirrored to .logs/backfill.log — watch with: tail -f .logs/backfill.log
@@ -281,9 +283,25 @@ stage_a_worker() {       # $1 = 'proj|csv'
   else progress A "$A_TOTAL" "FAIL stubs ${proj}"; fi
 }
 
+# Stage A (provisional stubs) runs when explicitly requested (BACKFILL_STUBS=1) or
+# automatically on a COLD START — when no repo has a map yet. A fresh knowledge base
+# then gets instant breadth (every repo a shallow stub, many per Claude turn) while
+# the slow, usage-paced Stage B fills in depth and upgrades each stub.
+# BACKFILL_NO_STUBS=1 suppresses the cold-start auto-trigger (go straight to maps).
+cold_start=1
+for r in "${repos[@]}"; do
+  [ -f "$KNOW_DIR/$r/index.md" ] && { cold_start=0; break; }
+done
+stub_reason=""
 if [ -n "${BACKFILL_STUBS:-}" ]; then
+  stub_reason="opt-in"
+elif [ "$cold_start" -eq 1 ] && [ -z "${BACKFILL_NO_STUBS:-}" ]; then
+  stub_reason="cold start — seeding breadth"
+fi
+
+if [ -n "$stub_reason" ]; then
   echo
-  echo "### Stage A — provisional stubs (opt-in) ###"
+  echo "### Stage A — provisional stubs (${stub_reason}) ###"
   a_tasks=()
   for proj in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do
     members=(${PROJ_MEMBERS[$proj]})
