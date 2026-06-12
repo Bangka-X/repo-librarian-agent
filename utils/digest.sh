@@ -48,6 +48,12 @@ DATE="$(date +%F)"
 
 MAP_TOOLS="Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git diff:*),Write"
 
+# Model used to synthesize the maps/overviews/graph. Loaded from librarian.conf
+# at the repo root (an env var of the same name still wins); edit that file to
+# change it. Defaults to Sonnet if the config is missing.
+[ -f "$ROOT_DIR/librarian.conf" ] && . "$ROOT_DIR/librarian.conf"
+MODEL="${LIBRARIAN_MODEL:-sonnet}"
+
 # Project code = the repo-name prefix before the first '_' or '-' delimiter.
 # Repos in the org share a high-level project code (sierra_crawler-tiktok and
 # sierra_sml-harvest-agent both belong to 'sierra'); the delimiter is not fixed,
@@ -187,7 +193,7 @@ Then 2-6 bullets capturing the MEANINGFUL changes and the decision/rationale beh
 
 Write ONLY these two files (.knowledge/${name}/index.md and .knowledge/${name}/.pending-entry.md)."
 
-  if claude -p "$PROMPT" --allowedTools "$MAP_TOOLS" >/dev/null 2>&1 && [ -f "$kfile" ]; then
+  if claude -p "$PROMPT" --model "$MODEL" --allowedTools "$MAP_TOOLS" >/dev/null 2>&1 && [ -f "$kfile" ]; then
     # Prepend the new entry to the decision log (newest first), then clean up.
     if [ -s "$pending" ]; then
       if [ -f "$decisions" ]; then
@@ -271,7 +277,7 @@ Then these sections, in order:
 ## Shared contracts - the schemas, endpoints, queues, env/config that members share with each other, each cited repo/path:line, naming which member produces and which consumes.
 ## Gotchas - cross-cutting footguns spanning the project.
 Cite real repo/path:line. Mark any link you infer rather than see stated as (inferred). Dense, a map not a transcript. Write ONLY .knowledge/${proj}/overview.md."
-  if claude -p "$OPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
+  if claude -p "$OPROMPT" --model "$MODEL" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
        && [ -f "$overview" ]; then
     echo "  ok    $proj/overview.md"
     agg_changed=1
@@ -295,7 +301,7 @@ if [ "$projects_total" -ge 2 ] \
   # Read the already-distilled project OVERVIEWS, not the raw per-repo maps. This
   # keeps the input O(projects), not O(repos), so it stays tractable at ~100 repos.
   CPROMPT="You are mapping how an organization's PROJECTS connect, for a code librarian. The projects (each a family of repos sharing a name prefix) are: $(for p in $(printf '%s\n' "${!PROJ_MEMBERS[@]}" | sort); do printf '%s [%s], ' "$p" "${PROJ_MEMBERS[$p]}"; done). Read each project's distilled overview at .knowledge/<project>/overview.md; for a single-repo project that has no overview, read that one repo's map .knowledge/<repo>/index.md instead. Rely on these distilled docs and their cited pointers — do NOT crawl every per-repo map or open .repositories; the overviews already name each project's shared contracts. Write .knowledge/connections.md, focused on edges that CROSS a project boundary (e.g. a sierra repo calling a holocron repo) — these matter most precisely because they cross families. Cover: (1) a one-line roster of the projects and what each does; (2) every cross-project edge, with direction and mechanism (HTTP endpoint, shared DB/schema, queue, model artifact, file/wire contract), cited repo/path:line as surfaced by the overviews; (3) the end-to-end data flow where it spans projects. Use short bullets and arrows like 'projectA/repo -> projectB/repo: mechanism'. If no cross-project edges exist, say so plainly and just give the roster. Mark inferred links (inferred). Begin with '# Cross-project connections', a blank line, then '_Last built: ${DATE}_'. Write ONLY .knowledge/connections.md."
-  if claude -p "$CPROMPT" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
+  if claude -p "$CPROMPT" --model "$MODEL" --allowedTools "Read,Grep,Glob,Write" >/dev/null 2>&1 \
        && [ -f "$conn" ]; then
     echo "  ok    connections.md"
   else
