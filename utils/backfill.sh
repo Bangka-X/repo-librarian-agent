@@ -79,7 +79,11 @@ needs_map() {
   [ -f "$f" ] || return 0
   [ -f "$KNOW_DIR/$1/decisions.md" ] || return 0
   grep -q '^provisional: true$' "$f" && return 0
-  sha="$(git -C "$REPOS_DIR/$r" rev-parse --short HEAD 2>/dev/null)" || return 0
+  # An empty repo (no commits / unborn HEAD) has no resolvable sha. digest.sh maps
+  # it with `commit: unknown` and skips on that; mirror it here with the same
+  # sentinel, or these repos look perpetually stale and Stage B never converges.
+  sha="$(git -C "$REPOS_DIR/$r" rev-parse --short HEAD 2>/dev/null)" || sha="unknown"
+  [ -z "$sha" ] && sha="unknown"
   grep -q "^commit: ${sha}\$" "$f" || return 0
   return 1
 }
