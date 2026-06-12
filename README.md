@@ -64,19 +64,28 @@ bash stop.sh                 # stop all librarian services
 
 ## Configuration
 
-Project-wide settings live in [`librarian.conf`](librarian.conf) at the repo root. Edit
-one line there and it applies everywhere the librarian runs — sync, cold-start backfill,
-the `ask.sh` CLI, the booted session, and the MCP tools all read it.
+All tunable settings live in one place — [`librarian.conf`](librarian.conf) at the repo
+root. Edit a value there and it applies everywhere the librarian runs: sync, cold-start
+backfill, the `ask.sh` CLI, the booted session, and the MCP tools all read it. The file
+is plain `KEY=value` shell with inline docs for every setting.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LIBRARIAN_MODEL` | `sonnet` | Which Claude model the librarian runs on, passed straight to `claude --model`. Use an alias (`sonnet`, `opus`, `haiku`) or a full id (e.g. `claude-sonnet-4-6`). Sonnet is fast and economical and ample for reading the mirror; switch to `opus` for the hardest questions or richest maps. |
+| `LIBRARIAN_MODEL` | `sonnet` | Claude model the librarian runs on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
+| `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the `/loop` re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
+| `LIBRARIAN_HOST` / `LIBRARIAN_PORT` | `127.0.0.1` / `8008` | Bind address for the remote HTTP MCP server. |
+| `BACKFILL_PACE_SECONDS` | `7200` | Sleep between cold-start deep-map cycles (paced around usage limits). Lower = faster. |
+| `BACKFILL_BATCH` | `20` | Repos deep-mapped per cycle. |
+| `LIBRARIAN_ASK_TIMEOUT` | `300` | Seconds an `ask_librarian` query may run before it's killed. |
+| `LIBRARIAN_SEARCH_CAP` / `LIBRARIAN_LINE_CAP` | `50` / `300` | `search_code` caps: max matches, max chars per line. |
 
-An environment variable of the same name takes precedence, so you can override for a
-single run without editing the file:
+See `librarian.conf` for the full set (backfill concurrency, stub batching, service
+toggles, …). An **environment variable of the same name takes precedence**, so you can
+override any setting for a single run without editing the file:
 
 ```bash
 LIBRARIAN_MODEL=opus bash utils/ask.sh "the hard cross-repo question"
+BACKFILL_PACE_SECONDS=0 bash utils/backfill.sh      # one-off: build with no pacing
 ```
 
 ## Integrate with your Claude

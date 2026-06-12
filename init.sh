@@ -23,14 +23,17 @@ REPOS_DIR="$SCRIPT_DIR/.repositories"
 KNOW_DIR="$SCRIPT_DIR/.knowledge"
 LOGS_DIR="$SCRIPT_DIR/.logs"
 INPUT_FILE="$SCRIPT_DIR/.repos.input"
-INTERVAL="${1:-15m}"
 SESSION="librarian"
 
-# Central settings (model selection, etc.) live in librarian.conf at the repo
-# root; an env var of the same name still wins. Sourced so the booted librarian
-# and every script it spawns run on the configured model.
+# Central settings (model, sync interval, HTTP host/port, backfill knobs) live in
+# librarian.conf at the repo root; an env var of the same name still wins. Sourced
+# here so init.sh and every script/session it spawns share one config.
 [ -f "$SCRIPT_DIR/librarian.conf" ] && . "$SCRIPT_DIR/librarian.conf"
 MODEL="${LIBRARIAN_MODEL:-sonnet}"
+
+# Sync interval: a positional arg (e.g. `bash init.sh 5m`) wins, else the value
+# from librarian.conf / env (LIBRARIAN_SYNC_INTERVAL), else 15m.
+INTERVAL="${1:-${LIBRARIAN_SYNC_INTERVAL:-15m}}"
 
 # --- 1. Scaffold (idempotent) ------------------------------------------------
 # Create every runtime directory the librarian depends on up front, so nothing
@@ -117,7 +120,8 @@ fi
 
 # --- 3. Start the remote MCP server (Streamable HTTP + bearer token) ---------
 # Runs in its own tmux session, independent of the sync session. Skip entirely
-# with LIBRARIAN_NO_HTTP=1. Host/port override via LIBRARIAN_HOST / LIBRARIAN_PORT.
+# with LIBRARIAN_NO_HTTP=1. Host/port come from librarian.conf (LIBRARIAN_HOST /
+# LIBRARIAN_PORT), overridable per-run via an env var of the same name.
 if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
   HTTP_SESSION="librarian-http"
   TOKEN_FILE="$SCRIPT_DIR/.librarian.token"

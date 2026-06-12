@@ -41,32 +41,41 @@ LOG_DIR = ROOT_DIR / ".logs"
 LOG_FILE = LOG_DIR / "librarian.log"          # concise one-line-per-call audit
 FEED_FILE = LOG_DIR / "librarian-feed.log"    # live trace of Claude's steps (tail -f in tmux)
 
-def _config_model():
-    """Which Claude model to run the librarian on. Resolution order: an env var
-    (LIBRARIAN_MODEL) wins, else the value in librarian.conf at the repo root,
-    else 'sonnet'. Keeps the model a single, easily-edited setting shared with
-    the shell scripts. The conf line looks like:  : "${LIBRARIAN_MODEL:=sonnet}"
+def _config(key, default):
+    """Resolve a librarian setting, shared with the shell scripts via the repo's
+    librarian.conf. Order: an env var of the same name wins, else the value in
+    librarian.conf (shell `: "${KEY:=value}"` or `KEY=value`, comments skipped),
+    else `default`. So one edit in librarian.conf applies to shell and Python alike.
     """
-    env = os.environ.get("LIBRARIAN_MODEL")
-    if env:
-        return env
+    val = os.environ.get(key)
+    if val:
+        return val
     conf = ROOT_DIR / "librarian.conf"
     if conf.exists():
+        pat = re.compile(re.escape(key) + r':?=["\']?([^"\'}\s]+)')
         for line in conf.read_text().splitlines():
             line = line.strip()
             if not line or line.startswith("#"):    # skip blanks and comments
                 continue
-            m = re.search(r'LIBRARIAN_MODEL:?=["\']?([^"\'}\s]+)', line)
+            m = pat.search(line)
             if m:
                 return m.group(1)
-    return "sonnet"
+    return default
 
 
-MODEL = _config_model()            # passed to `claude --model`
+def _config_int(key, default):
+    """_config() coerced to int, falling back to the default on a bad value."""
+    try:
+        return int(_config(key, str(default)))
+    except ValueError:
+        return default
+
+
+MODEL = _config("LIBRARIAN_MODEL", "sonnet")        # passed to `claude --model`
 ALLOWED_TOOLS = "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
-ASK_TIMEOUT = 300                  # seconds for a librarian query
-SEARCH_CAP = 50                    # max grep matches returned
-LINE_CAP = 300                     # max chars per match line
+ASK_TIMEOUT = _config_int("LIBRARIAN_ASK_TIMEOUT", 300)   # seconds for a librarian query
+SEARCH_CAP = _config_int("LIBRARIAN_SEARCH_CAP", 50)      # max grep matches returned
+LINE_CAP = _config_int("LIBRARIAN_LINE_CAP", 300)         # max chars per match line
 MAX_LOG_BYTES = 10 * 1024 * 1024   # cap each log file at 10 MB, keep one rollover
 
 

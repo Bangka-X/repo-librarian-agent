@@ -21,10 +21,12 @@
 #   bash utils/backfill.sh status    # pending count, paused/running, log tail
 #   (hard stop: tmux kill-session -t librarian-backfill; relaunch to resume)
 #
-# Knobs (env):
+# Knobs — set persistently in librarian.conf at the repo root, or override per-run
+# via an env var of the same name (the env var wins):
 #   BACKFILL_BATCH=20            repos deep-mapped per cycle
 #   BACKFILL_PACE_SECONDS=7200   sleep between cycles (2h)
 #   BACKFILL_CONCURRENCY         workers within a batch (default min(cores,10))
+#   BACKFILL_STUB_BATCH=12       repos per Claude turn in the Stage A stub pass
 #   BACKFILL_STUBS=1             force the Stage A stub pass (auto-runs on cold start)
 #   BACKFILL_NO_STUBS=1          skip Stage A even on a cold start (straight to maps)
 #   BACKFILL_RETRIES=3           transient-failure retries per task
@@ -54,20 +56,22 @@ detect_cores() {
   fi
 }
 
+# Central settings live in librarian.conf at the repo root. Source it FIRST, so
+# the values there seed the knobs below; an env var of the same name still wins
+# (the conf uses :=), so per-run overrides keep working. The deep-map/aggregate
+# phases shell out to digest.sh, which sources the same file, so one edit applies
+# to every stage. Knobs are read at startup — change a value, then restart the
+# backfill for it to take effect (it resumes safely, skipping mapped repos).
+[ -f "$ROOT_DIR/librarian.conf" ] && . "$ROOT_DIR/librarian.conf"
+
 CONC="${BACKFILL_CONCURRENCY:-$(detect_cores)}"
-[ "$CONC" -gt 10 ] && CONC=10
+[ "$CONC" -gt 10 ] && CONC=10           # hard cap, regardless of conf/env, to spare usage limits
 [ "$CONC" -lt 1 ] && CONC=1
 BATCH="${BACKFILL_BATCH:-20}";            [ "$BATCH" -lt 1 ] && BATCH=1
 PACE="${BACKFILL_PACE_SECONDS:-7200}";    [ "$PACE" -lt 0 ] && PACE=0
 STUB_BATCH="${BACKFILL_STUB_BATCH:-12}";  [ "$STUB_BATCH" -lt 1 ] && STUB_BATCH=1
 RETRIES="${BACKFILL_RETRIES:-3}"
-
-# Model used for the maps. Loaded from librarian.conf at the repo root (an env var
-# of the same name still wins); edit that file to change it. Defaults to Sonnet.
-# The deep-map/aggregate phases shell out to digest.sh, which reads the same
-# config, so a single edit applies to every stage.
-[ -f "$ROOT_DIR/librarian.conf" ] && . "$ROOT_DIR/librarian.conf"
-MODEL="${LIBRARIAN_MODEL:-sonnet}"
+MODEL="${LIBRARIAN_MODEL:-sonnet}"        # passed to `claude --model`
 
 # --- needs_map: mirror digest.sh's skip rule (missing/provisional/stale) ------
 needs_map() {
