@@ -4,7 +4,8 @@
 #
 # Reads the hidden input file, then for each repo link: clones it into
 # .repositories/ if missing, or fast-forward pulls it if already there.
-# Skips repos with uncommitted changes (never clobbers local work).
+# Skips repos with uncommitted changes (never clobbers local work). Repos are
+# synced in parallel (LIBRARIAN_SYNC_CONCURRENCY, default 8) since it's network-bound.
 #
 # Run init.sh first to create the input file. Safe to run repeatedly — this is
 # what the /loop interval calls.
@@ -21,9 +22,30 @@ if [ ! -f "$INPUT_FILE" ]; then
 fi
 mkdir -p "$REPOS_DIR"
 
-cloned=0 pulled=0 skipped=0 failed=0
-failed_names=()
+# Central settings (sync concurrency, etc.) from librarian.conf; env still wins.
+[ -f "$SCRIPT_DIR/librarian.conf" ] && . "$SCRIPT_DIR/librarian.conf"
 
+# Syncing is network-bound, so walking the list one repo at a time is slow. Run up
+# to SYNC_CONC clone/pull jobs at once (override: LIBRARIAN_SYNC_CONCURRENCY).
+SYNC_CONC="${LIBRARIAN_SYNC_CONCURRENCY:-8}"
+[ "$SYNC_CONC" -lt 1 ] && SYNC_CONC=1
+
+# Bounded-parallel runner: keep at most $max jobs in flight, then drain.
+parallel_map() {
+  local max="$1" func="$2"; shift 2
+  local item
+  for item in "$@"; do
+    "$func" "$item" &
+    while [ "$(jobs -rp | wc -l)" -ge "$max" ]; do wait -n 2>/dev/null || true; done
+  done
+  wait
+}
+
+# --- Parse the input into (url|name) entries (cheap, sequential) --------------
+# Only string normalization/validation here; the network work runs in parallel.
+entries=()
+failed=0
+failed_names=()
 while IFS= read -r line || [ -n "$line" ]; do
   entry="$(echo "$line" | xargs)"        # trim whitespace
   [ -z "$entry" ] && continue            # blank line
@@ -39,29 +61,55 @@ while IFS= read -r line || [ -n "$line" ]; do
   esac
 
   name="$(basename "$url")"; name="${name%.git}"
+  entries+=("$url|$name")
+done < "$INPUT_FILE"
+
+# --- Clone/pull every repo in parallel ---------------------------------------
+# Each worker appends one "status<TAB>name" line to RESULTS. The lines are short
+# (well under PIPE_BUF), so concurrent O_APPEND writes don't interleave — that's
+# how we tally accurately even though counters can't cross the background-job fork.
+RESULTS="$(mktemp)"
+trap 'rm -f "$RESULTS"' EXIT
+
+sync_one() {
+  local entry="$1" url name dest
+  url="${entry%%|*}"; name="${entry#*|}"
   dest="$REPOS_DIR/$name"
 
   if [ -d "$dest/.git" ]; then
-    if [ -n "$(git -C "$dest" status --porcelain)" ]; then
+    if [ -n "$(git -C "$dest" status --porcelain 2>/dev/null)" ]; then
       echo "skip   $name (uncommitted changes)"
-      skipped=$((skipped + 1))
+      printf 'skip\t%s\n' "$name" >> "$RESULTS"
     elif git -C "$dest" pull --ff-only --quiet; then
       echo "pull   $name"
-      pulled=$((pulled + 1))
+      printf 'pull\t%s\n' "$name" >> "$RESULTS"
     else
       echo "FAIL   $name (pull failed — diverged or network)"
-      failed=$((failed + 1)); failed_names+=("$name")
+      printf 'fail\t%s\n' "$name" >> "$RESULTS"
     fi
   else
     if git clone --quiet "$url" "$dest"; then
       echo "clone  $name"
-      cloned=$((cloned + 1))
+      printf 'clone\t%s\n' "$name" >> "$RESULTS"
     else
       echo "FAIL   $name (clone failed)"
-      failed=$((failed + 1)); failed_names+=("$name")
+      printf 'fail\t%s\n' "$name" >> "$RESULTS"
     fi
   fi
-done < "$INPUT_FILE"
+}
+
+[ "${#entries[@]}" -gt 0 ] && parallel_map "$SYNC_CONC" sync_one "${entries[@]}"
+
+# --- Tally (format errors already counted above) -----------------------------
+cloned=0 pulled=0 skipped=0
+while IFS=$'\t' read -r status name; do
+  case "$status" in
+    clone) cloned=$((cloned + 1)) ;;
+    pull)  pulled=$((pulled + 1)) ;;
+    skip)  skipped=$((skipped + 1)) ;;
+    fail)  failed=$((failed + 1)); failed_names+=("$name") ;;
+  esac
+done < "$RESULTS"
 
 echo "----"
 echo "cloned: $cloned  pulled: $pulled  skipped: $skipped  failed: $failed"

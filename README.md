@@ -168,6 +168,14 @@ Per repo it **clones** if missing, **fast-forward pulls** if present, and **skip
 with uncommitted local changes. The Claude `/loop` in the `librarian` session runs this
 every interval.
 
+Syncing is network-bound, so repos are cloned/pulled **in parallel** — up to
+`LIBRARIAN_SYNC_CONCURRENCY` (default 8) at once. Raise it in [`librarian.conf`](librarian.conf)
+for a big mirror on a fast connection, or lower it if you hit GitHub connection limits:
+
+```bash
+LIBRARIAN_SYNC_CONCURRENCY=16 bash loop.sh   # one-off override
+```
+
 ## Observability
 
 Every `ask_librarian` call streams Claude's real steps (each grep/read + the answer) to a
