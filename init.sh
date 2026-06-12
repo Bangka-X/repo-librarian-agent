@@ -20,12 +20,28 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPOS_DIR="$SCRIPT_DIR/.repositories"
+KNOW_DIR="$SCRIPT_DIR/.knowledge"
+LOGS_DIR="$SCRIPT_DIR/.logs"
 INPUT_FILE="$SCRIPT_DIR/.repos.input"
-INTERVAL="${1:-15m}"
 SESSION="librarian"
 
+# Central settings (model, sync interval, HTTP host/port, backfill knobs) live in
+# librarian.conf at the repo root; an env var of the same name still wins. Sourced
+# here so init.sh and every script/session it spawns share one config.
+[ -f "$SCRIPT_DIR/librarian.conf" ] && . "$SCRIPT_DIR/librarian.conf"
+MODEL="${LIBRARIAN_MODEL:-sonnet}"
+
+# Sync interval: a positional arg (e.g. `bash init.sh 5m`) wins, else the value
+# from librarian.conf / env (LIBRARIAN_SYNC_INTERVAL), else 15m.
+INTERVAL="${1:-${LIBRARIAN_SYNC_INTERVAL:-15m}}"
+
 # --- 1. Scaffold (idempotent) ------------------------------------------------
-mkdir -p "$REPOS_DIR"
+# Create every runtime directory the librarian depends on up front, so nothing
+# downstream has to assume it exists. All three are gitignored, derived state:
+#   .repositories  the read-only mirror loop.sh clones/pulls into
+#   .knowledge     the curated maps digest.sh builds (overviews, decisions, …)
+#   .logs          the MCP server's audit + live-feed logs
+mkdir -p "$REPOS_DIR" "$KNOW_DIR" "$LOGS_DIR"
 
 if [ ! -f "$INPUT_FILE" ]; then
   cat > "$INPUT_FILE" <<'EOF'
@@ -73,9 +89,39 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
+# --- 2.5 Cold-start backfill -------------------------------------------------
+# Build the knowledge base for the mirror. We do NOT skip this just because some
+# maps already exist — backfill runs whenever repos are listed and keeps going
+# until every repo is deep-mapped. It is idempotent and cheap when complete: per
+# repo it skips work already finished and only fills what's missing or still
+# provisional. We (1) fetch every repo to completion FIRST — so the backfill sees
+# the whole mirror — then (2) launch the staged, parallel build in its own tmux
+# session, which holds .knowledge/.backfill.lock so the sync loop defers its
+# digest while it runs. Disable entirely with LIBRARIAN_NO_BACKFILL=1.
+BACKFILL_SESSION="librarian-backfill"
+has_repos_listed="$(grep -cvE '^\s*(#|$)' "$INPUT_FILE" 2>/dev/null || true)"
+has_repos_listed="${has_repos_listed:-0}"
+
+if [ "$has_repos_listed" -gt 0 ] && [ -z "${LIBRARIAN_NO_BACKFILL:-}" ]; then
+  if tmux has-session -t "=$BACKFILL_SESSION" 2>/dev/null; then
+    echo "Knowledge backfill already running (tmux '$BACKFILL_SESSION')."
+  else
+    echo "Ensuring full knowledge coverage — fetching all repos, then backfilling…"
+    # Synchronous full fetch (digest disabled here; the backfill owns indexing).
+    LIBRARIAN_NO_DIGEST=1 bash "$SCRIPT_DIR/loop.sh" || \
+      echo "warning: some repos failed to fetch; backfilling whatever landed." >&2
+
+    echo "Launching staged backfill in tmux '$BACKFILL_SESSION'…"
+    tmux new-session -d -s "$BACKFILL_SESSION" -c "$SCRIPT_DIR" \
+      "bash '$SCRIPT_DIR/utils/backfill.sh'; echo; echo '[backfill finished — press a key to close]'; read -n 1"
+    echo "  watch it:  tail -f .logs/backfill.log     (or: tmux attach -t $BACKFILL_SESSION)"
+  fi
+fi
+
 # --- 3. Start the remote MCP server (Streamable HTTP + bearer token) ---------
 # Runs in its own tmux session, independent of the sync session. Skip entirely
-# with LIBRARIAN_NO_HTTP=1. Host/port override via LIBRARIAN_HOST / LIBRARIAN_PORT.
+# with LIBRARIAN_NO_HTTP=1. Host/port come from librarian.conf (LIBRARIAN_HOST /
+# LIBRARIAN_PORT), overridable per-run via an env var of the same name.
 if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
   HTTP_SESSION="librarian-http"
   TOKEN_FILE="$SCRIPT_DIR/.librarian.token"
@@ -125,7 +171,7 @@ if tmux has-session -t "=$SESSION" 2>/dev/null; then
   echo "Librarian sync session already running (tmux '$SESSION')."
 else
   tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" \
-    "claude -n librarian \"$BOOT_PROMPT\""
+    "claude -n librarian --model $MODEL \"$BOOT_PROMPT\""
   echo "Librarian booted in tmux session '$SESSION' (sync every ${INTERVAL})."
 fi
 
@@ -137,6 +183,9 @@ echo "Librarian is up. Background tmux sessions:"
 echo "  $SESSION  — sync daemon (Claude /loop → loop.sh)"
 if [ -n "${HTTP_SESSION:-}" ] && tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
   echo "  $HTTP_SESSION  — HTTP MCP server (http://${HTTP_HOST}:${HTTP_PORT}/mcp)"
+fi
+if tmux has-session -t "=$BACKFILL_SESSION" 2>/dev/null; then
+  echo "  $BACKFILL_SESSION  — cold-start knowledge build (one-time; exits when done)"
 fi
 echo
 echo "  List:   tmux ls"

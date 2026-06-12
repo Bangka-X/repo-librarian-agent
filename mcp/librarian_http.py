@@ -47,19 +47,61 @@ mcp = FastMCP("librarian", host=HOST, port=PORT)
 
 
 @mcp.tool()
-def ask_librarian(question: str, repos: list[str] | None = None) -> str:
+def ask_librarian(question: str, project: str | None = None,
+                  repos: list[str] | None = None) -> str:
     """Ask a natural-language question about the organization's repositories and get a
     synthesized answer with citations (repo/path/file:line). Use for explanations, an
     API/contract, how something works, or anything spanning repos. Costs a Claude turn;
-    to just locate code, prefer search_code."""
-    return core.ask_librarian(question, repos)
+    to just locate code, prefer search_code. If you know the project code you're working on
+    (e.g. 'sierra', 'holocron'), pass it as `project` to scope and speed up the answer."""
+    return core.ask_librarian(question, repos, project)
 
 
 @mcp.tool()
 def list_repositories() -> str:
-    """List the repositories currently in the mirror, each with its last commit. Cheap
-    (no Claude turn). Use to discover coverage before asking."""
+    """List the repositories in the mirror, GROUPED BY PROJECT CODE, each with its last commit
+    and a one-line summary from its knowledge-base map. Cheap (no Claude turn). Use to discover
+    the project codes and coverage, then read_project_map for a family or read_repo_map for one
+    repo, then ask scoped with `project`."""
     return core.list_repositories()
+
+
+@mcp.tool()
+def read_project_map(project: str) -> str:
+    """Return a project's synthesized overview: what the family of repos does, each member's
+    role, the end-to-end flow and shared contracts WITHIN the project, with repo/path:line
+    pointers. Cheap (no Claude turn). Read this FIRST when a question is scoped to a project
+    code (e.g. 'sierra') — it orients across the whole family before you drill into one repo
+    with read_repo_map."""
+    return core.read_project_map(project)
+
+
+@mcp.tool()
+def read_repo_map(repo: str | None = None) -> str:
+    """Return a curated, pre-distilled map of the codebase: with no argument, the top-level
+    index of all repos; with a repo name, that repo's overview — purpose, entry points, key
+    components, APIs/contracts, where docs live, and gotchas, each with repo/path:line
+    pointers. Cheap (no Claude turn). Read this FIRST to orient and locate the right files,
+    then search_code/ask_librarian to dig in."""
+    return core.read_repo_map(repo)
+
+
+@mcp.tool()
+def read_repo_history(repo: str) -> str:
+    """Return a repo's decision log: a reverse-chronological, pre-distilled record of what
+    changed and WHY, mined from its git history (newest first). Cheap (no Claude turn). Use
+    for 'why does it work this way', 'when/why did X change', 'what changed recently' —
+    questions about evolution and rationale, not current structure."""
+    return core.read_repo_history(repo)
+
+
+@mcp.tool()
+def read_connections() -> str:
+    """Return the cross-repo integration graph: which repo calls/depends on which and how, the
+    shared contracts/schemas (with repo/path:line), and the end-to-end data flow across the
+    system. Cheap (no Claude turn). Use FIRST for any question that spans repos or asks how one
+    service's output reaches another."""
+    return core.read_connections()
 
 
 @mcp.tool()

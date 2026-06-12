@@ -62,6 +62,32 @@ bash stop.sh                 # stop all librarian services
 > Override the interval/host/port: `bash init.sh 5m`, `LIBRARIAN_PORT=9000 bash init.sh`,
 > or skip the HTTP server entirely with `LIBRARIAN_NO_HTTP=1 bash init.sh`.
 
+## Configuration
+
+All tunable settings live in one place — [`librarian.conf`](librarian.conf) at the repo
+root. Edit a value there and it applies everywhere the librarian runs: sync, cold-start
+backfill, the `ask.sh` CLI, the booted session, and the MCP tools all read it. The file
+is plain `KEY=value` shell with inline docs for every setting.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `LIBRARIAN_MODEL` | `sonnet` | Claude model the librarian runs on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
+| `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the `/loop` re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
+| `LIBRARIAN_HOST` / `LIBRARIAN_PORT` | `127.0.0.1` / `8008` | Bind address for the remote HTTP MCP server. |
+| `BACKFILL_PACE_SECONDS` | `7200` | Sleep between cold-start deep-map cycles (paced around usage limits). Lower = faster. |
+| `BACKFILL_BATCH` | `20` | Repos deep-mapped per cycle. |
+| `LIBRARIAN_ASK_TIMEOUT` | `300` | Seconds an `ask_librarian` query may run before it's killed. |
+| `LIBRARIAN_SEARCH_CAP` / `LIBRARIAN_LINE_CAP` | `50` / `300` | `search_code` caps: max matches, max chars per line. |
+
+See `librarian.conf` for the full set (backfill concurrency, stub batching, service
+toggles, …). An **environment variable of the same name takes precedence**, so you can
+override any setting for a single run without editing the file:
+
+```bash
+LIBRARIAN_MODEL=opus bash utils/ask.sh "the hard cross-repo question"
+BACKFILL_PACE_SECONDS=0 bash utils/backfill.sh      # one-off: build with no pacing
+```
+
 ## Integrate with your Claude
 
 There are two transports. **For local use you're already done** — pick based on where
@@ -142,6 +168,14 @@ Per repo it **clones** if missing, **fast-forward pulls** if present, and **skip
 with uncommitted local changes. The Claude `/loop` in the `librarian` session runs this
 every interval.
 
+Syncing is network-bound, so repos are cloned/pulled **in parallel** — up to
+`LIBRARIAN_SYNC_CONCURRENCY` (default 8) at once. Raise it in [`librarian.conf`](librarian.conf)
+for a big mirror on a fast connection, or lower it if you hit GitHub connection limits:
+
+```bash
+LIBRARIAN_SYNC_CONCURRENCY=16 bash loop.sh   # one-off override
+```
+
 ## Observability
 
 Every `ask_librarian` call streams Claude's real steps (each grep/read + the answer) to a
@@ -162,6 +196,7 @@ Both are capped at 10 MB (rolled to `.log.1`) and gitignored.
 repos-agent/
 ├── CLAUDE.md            # librarian agent system prompt
 ├── README.md           # this file
+├── librarian.conf      # project settings (model selection)
 ├── init.sh             # boot: scaffold + start the two tmux daemons
 ├── loop.sh             # sync: clone/pull every repo in .repos.input
 ├── stop.sh             # stop all librarian services

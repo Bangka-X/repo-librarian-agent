@@ -1,6 +1,9 @@
 # Mirrored org repositories — local mirror, never committed
 .repositories/
 
+# Claude-generated knowledge base — derived from the mirror, regenerable
+.knowledge/
+
 # Repo list — your input file, never committed
 .repos.input
 

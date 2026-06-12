@@ -17,6 +17,11 @@ set -uo pipefail
 # This script lives in utils/; the project root is one level up.
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
+# Load central settings (model selection, etc.) from librarian.conf at the repo
+# root; an env var of the same name still wins. See that file to change the model.
+[ -f "$ROOT_DIR/librarian.conf" ] && . "$ROOT_DIR/librarian.conf"
+MODEL="${LIBRARIAN_MODEL:-sonnet}"
+
 # Question from args, or from stdin if none were given.
 QUESTION="$*"
 if [ -z "$QUESTION" ] && [ ! -t 0 ]; then
@@ -39,5 +44,5 @@ unset ANTHROPIC_API_KEY
 # Run from the project root so CLAUDE.md auto-loads and .repositories/ is in
 # scope. Read-only tools only — the librarian answers, never modifies.
 cd "$ROOT_DIR"
-exec claude -p "$QUESTION" \
+exec claude -p "$QUESTION" --model "$MODEL" \
   --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
