@@ -8,7 +8,7 @@
 # synced in parallel (LIBRARIAN_SYNC_CONCURRENCY, default 8) since it's network-bound.
 #
 # Run init.sh first to create the input file. Safe to run repeatedly — this is
-# what the /loop interval calls.
+# what the sync daemon calls every interval.
 
 set -uo pipefail
 

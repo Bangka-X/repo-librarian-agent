@@ -46,7 +46,7 @@ bash init.sh                 # brings the librarian up (see below)
 
 | tmux session | what it is |
 |---|---|
-| `librarian` | sync daemon — Claude `/loop` running `loop.sh` every 15 min |
+| `librarian` | sync daemon — a bash loop running `loop.sh` every 15 min |
 | `librarian-http` | the remote MCP server (Streamable HTTP + bearer token) on `127.0.0.1:8008` |
 
 Manage them:
@@ -72,7 +72,7 @@ is plain `KEY=value` shell with inline docs for every setting.
 | Setting | Default | What it does |
 |---|---|---|
 | `LIBRARIAN_MODEL` | `sonnet` | Claude model the librarian runs on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
-| `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the `/loop` re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
+| `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the sync daemon re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
 | `LIBRARIAN_HOST` / `LIBRARIAN_PORT` | `127.0.0.1` / `8008` | Bind address for the remote HTTP MCP server. |
 | `BACKFILL_PACE_SECONDS` | `7200` | Sleep between cold-start deep-map cycles (paced around usage limits). Lower = faster. |
 | `BACKFILL_BATCH` | `20` | Repos deep-mapped per cycle. |
@@ -165,7 +165,7 @@ git@github.com:org/repo.git        # SSH
 ```
 
 Per repo it **clones** if missing, **fast-forward pulls** if present, and **skips** repos
-with uncommitted local changes. The Claude `/loop` in the `librarian` session runs this
+with uncommitted local changes. The bash sync loop in the `librarian` session runs this
 every interval.
 
 Syncing is network-bound, so repos are cloned/pulled **in parallel** — up to

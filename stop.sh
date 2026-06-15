@@ -3,7 +3,7 @@
 # stop.sh — stop ALL librarian background services and their workers.
 #
 # Kills the tmux sessions started by init.sh:
-#   librarian           — Claude /loop sync daemon
+#   librarian           — bash sync daemon (loop.sh on an interval)
 #   librarian-backfill  — cold-start knowledge build (Stage A/B/C)
 #   librarian-http      — Streamable HTTP MCP server
 #   librarian-feed      — the watch.sh live viewer

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 #
-# init.sh — boot the librarian in a tmux session (Arduino-style setup()).
+# init.sh — boot the librarian's background services in tmux (Arduino-style setup()).
 #
-# Runs the one-time scaffold (idempotent), then launches a persistent Claude
-# Code session inside a detached tmux session named "librarian" that:
-#   1. configures a /loop to run `bash loop.sh` every INTERVAL (sync), then
-#   2. stays open as the librarian, answering questions about the mirror.
+# Runs the one-time scaffold (idempotent), then starts a detached tmux session
+# named "librarian" that runs a plain shell loop: it syncs the mirror with
+# `bash loop.sh` immediately, then re-syncs every INTERVAL. No model sits in the
+# sync hot path — answering questions is a separate concern, served by the HTTP
+# MCP server (see below). Keeping the loop in tmux ties it to the session, so the
+# whole thing is deployable as pure bash + tmux with no crontab on the host.
 #
-# Because it lives in tmux, the librarian survives closing your terminal.
+# Because it lives in tmux, the sync daemon survives closing your terminal.
 # Attach to watch/ask:   tmux attach -t librarian
 # Detach (leave running): Ctrl-b then d
 # Stop it:               tmux kill-session -t librarian
@@ -29,7 +31,6 @@ SESSION="librarian"
 # librarian.conf at the repo root; an env var of the same name still wins. Sourced
 # here so init.sh and every script/session it spawns share one config.
 [ -f "$SCRIPT_DIR/librarian.conf" ] && . "$SCRIPT_DIR/librarian.conf"
-MODEL="${LIBRARIAN_MODEL:-sonnet}"
 
 # Sync interval: a positional arg (e.g. `bash init.sh 5m`) wins, else the value
 # from librarian.conf / env (LIBRARIAN_SYNC_INTERVAL), else 15m.
@@ -162,17 +163,20 @@ if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
   fi
 fi
 
-# --- 4. Boot the librarian sync session in tmux -----------------------------
-# NOTE: this prompt is embedded in the tmux command string, so it must contain
-# no single/double quotes or backticks (they would break shell parsing).
-BOOT_PROMPT="You are the repository librarian for this project — read CLAUDE.md first for your role and rules. Startup task before anything else: use your /loop capability to schedule the shell command bash loop.sh to run every ${INTERVAL}, which keeps the .repositories mirror fresh. Confirm the loop is scheduled, run loop.sh once now for an initial sync, then stay open and answer questions about the mirrored repositories per CLAUDE.md."
-
+# --- 4. Start the sync daemon in tmux ---------------------------------------
+# A plain shell loop owns the periodic sync — no model in the hot path. It runs
+# loop.sh once immediately (initial sync), then re-syncs every INTERVAL forever.
+# `sleep` takes INTERVAL's suffix directly (15m, 2h, 30s, 1d), so no conversion is
+# needed. Output is tee'd to .logs/sync.log: `tmux attach -t librarian` shows it
+# live, and the log persists for after-the-fact inspection. Because it lives in
+# tmux its lifetime is the session's — stop.sh kills it with everything else, and
+# nothing is written to the host's crontab, so this deploys anywhere as-is.
 if tmux has-session -t "=$SESSION" 2>/dev/null; then
-  echo "Librarian sync session already running (tmux '$SESSION')."
+  echo "Librarian sync daemon already running (tmux '$SESSION')."
 else
   tmux new-session -d -s "$SESSION" -c "$SCRIPT_DIR" \
-    "claude -n librarian --model $MODEL \"$BOOT_PROMPT\""
-  echo "Librarian booted in tmux session '$SESSION' (sync every ${INTERVAL})."
+    "while true; do echo \"[sync] \$(date '+%Y-%m-%d %H:%M:%S') starting loop.sh\"; bash '$SCRIPT_DIR/loop.sh'; echo \"[sync] done — sleeping ${INTERVAL}\"; sleep ${INTERVAL}; done 2>&1 | tee -a '$LOGS_DIR/sync.log'"
+  echo "Librarian sync daemon started in tmux session '$SESSION' (every ${INTERVAL})."
 fi
 
 # Both sessions run DETACHED as background daemons. We deliberately do NOT
@@ -180,7 +184,7 @@ fi
 # Claude, where an accidental Ctrl-C/exit kills it (leaving only the HTTP one).
 echo
 echo "Librarian is up. Background tmux sessions:"
-echo "  $SESSION  — sync daemon (Claude /loop → loop.sh)"
+echo "  $SESSION  — sync daemon (bash loop → loop.sh every ${INTERVAL})"
 if [ -n "${HTTP_SESSION:-}" ] && tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
   echo "  $HTTP_SESSION  — HTTP MCP server (http://${HTTP_HOST}:${HTTP_PORT}/mcp)"
 fi
