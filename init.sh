@@ -138,25 +138,55 @@ if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
   fi
   TOKEN="$(cat "$TOKEN_FILE")"
 
-  # Ensure the Python venv with MCP deps exists (one-time setup).
-  if [ ! -x "$VENV_PY" ]; then
+  # The venv is "ready" only if the server's deps actually import — NOT merely if
+  # mcp/.venv/bin/python exists. `python3 -m venv` always leaves that symlink even
+  # when the pip install never ran (e.g. the host has no ensurepip, so pip is
+  # absent and the install silently no-ops). A binary-only guard would trust such
+  # a half-built venv on every subsequent boot and launch a server that can never
+  # import uvicorn — a stuck state re-running init.sh wouldn't heal. So we probe
+  # the imports, and rebuild whenever they fail.
+  venv_ok() { "$VENV_PY" -c 'import uvicorn, mcp' >/dev/null 2>&1; }
+
+  # Ensure the Python venv with MCP deps exists and imports cleanly (one-time
+  # setup; re-runs automatically if a prior attempt left the venv broken/partial).
+  if ! venv_ok; then
     echo "Setting up the HTTP server venv (one-time)…"
     if command -v uv >/dev/null 2>&1; then
       uv venv "$SCRIPT_DIR/mcp/.venv" >/dev/null 2>&1 &&
         uv pip install --python "$VENV_PY" -r "$SCRIPT_DIR/mcp/requirements.txt" >/dev/null 2>&1
     else
-      python3 -m venv "$SCRIPT_DIR/mcp/.venv" >/dev/null 2>&1 &&
-        "$VENV_PY" -m pip install -q -r "$SCRIPT_DIR/mcp/requirements.txt" >/dev/null 2>&1
+      python3 -m venv "$SCRIPT_DIR/mcp/.venv" >/dev/null 2>&1
+      # Some hosts ship python3 without ensurepip (no python3.x-venv package), so
+      # the new venv has no pip and the install below would silently do nothing.
+      # Detect that and bootstrap pip with get-pip.py before installing the deps.
+      if ! "$VENV_PY" -m pip --version >/dev/null 2>&1; then
+        echo "  venv has no pip (missing ensurepip) — bootstrapping with get-pip.py…"
+        get_pip="$SCRIPT_DIR/mcp/.venv/get-pip.py"
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL https://bootstrap.pypa.io/get-pip.py -o "$get_pip" 2>/dev/null
+        elif command -v wget >/dev/null 2>&1; then
+          wget -qO "$get_pip" https://bootstrap.pypa.io/get-pip.py 2>/dev/null
+        fi
+        [ -s "$get_pip" ] && "$VENV_PY" "$get_pip" >/dev/null 2>&1
+        rm -f "$get_pip"
+      fi
+      "$VENV_PY" -m pip install -q -r "$SCRIPT_DIR/mcp/requirements.txt" >/dev/null 2>&1
     fi
   fi
 
-  if [ ! -x "$VENV_PY" ]; then
-    echo "warning: could not set up mcp/.venv — skipping HTTP server." >&2
+  if ! venv_ok; then
+    echo "warning: mcp/.venv is missing required deps (uvicorn, mcp) and could not" >&2
+    echo "         be set up automatically — skipping HTTP server. Install pip" >&2
+    echo "         support (e.g. 'sudo apt install python3-venv') or 'uv' on PATH," >&2
+    echo "         then re-run init.sh." >&2
   elif tmux has-session -t "=$HTTP_SESSION" 2>/dev/null; then
     echo "HTTP MCP server already running (tmux '$HTTP_SESSION')."
   else
+    # Tee the server's stdout/stderr to .logs/http.log so a crash (e.g. an import
+    # error that exits instantly and tears the tmux session down) leaves a trace
+    # instead of vanishing silently.
     tmux new-session -d -s "$HTTP_SESSION" -c "$SCRIPT_DIR" \
-      "LIBRARIAN_TOKEN='$TOKEN' LIBRARIAN_HOST='$HTTP_HOST' LIBRARIAN_PORT='$HTTP_PORT' '$VENV_PY' '$SCRIPT_DIR/mcp/librarian_http.py'"
+      "LIBRARIAN_TOKEN='$TOKEN' LIBRARIAN_HOST='$HTTP_HOST' LIBRARIAN_PORT='$HTTP_PORT' '$VENV_PY' '$SCRIPT_DIR/mcp/librarian_http.py' 2>&1 | tee -a '$LOGS_DIR/http.log'"
     echo "HTTP MCP server started in tmux '$HTTP_SESSION' → http://$HTTP_HOST:$HTTP_PORT/mcp"
     echo "Register a client with:"
     echo "  claude mcp add --transport http librarian http://$HTTP_HOST:$HTTP_PORT/mcp --header \"Authorization: Bearer $TOKEN\""
