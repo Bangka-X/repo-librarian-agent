@@ -71,7 +71,8 @@ def _config_int(key, default):
         return default
 
 
-MODEL = _config("LIBRARIAN_MODEL", "sonnet")        # passed to `claude --model`
+MODEL = _config("LIBRARIAN_MODEL", "sonnet")        # backfill/digest: passed to `claude --model`
+ASK_MODEL = _config("LIBRARIAN_ASK_MODEL", "opus")  # ask_librarian only: interactive Q&A, worth the extra cost
 ALLOWED_TOOLS = "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
 ASK_TIMEOUT = _config_int("LIBRARIAN_ASK_TIMEOUT", 300)   # seconds for a librarian query
 SEARCH_CAP = _config_int("LIBRARIAN_SEARCH_CAP", 50)      # max grep matches returned
@@ -453,7 +454,7 @@ def ask_librarian(question, repos=None, project=None):
 
     # Stream Claude's real steps so a tmux watcher can see the work live, while
     # still capturing the final answer to return to the caller.
-    cmd = ["claude", "-p", prompt, "--model", MODEL, "--allowedTools", ALLOWED_TOOLS,
+    cmd = ["claude", "-p", prompt, "--model", ASK_MODEL, "--allowedTools", ALLOWED_TOOLS,
            "--verbose", "--output-format", "stream-json"]
     proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
