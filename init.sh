@@ -186,7 +186,7 @@ if [ -z "${LIBRARIAN_NO_HTTP:-}" ]; then
     # error that exits instantly and tears the tmux session down) leaves a trace
     # instead of vanishing silently.
     tmux new-session -d -s "$HTTP_SESSION" -c "$SCRIPT_DIR" \
-      "LIBRARIAN_TOKEN='$TOKEN' LIBRARIAN_HOST='$HTTP_HOST' LIBRARIAN_PORT='$HTTP_PORT' '$VENV_PY' '$SCRIPT_DIR/mcp/librarian_http.py' 2>&1 | tee -a '$LOGS_DIR/http.log'"
+      "LIBRARIAN_TOKEN='$TOKEN' LIBRARIAN_HOST='$HTTP_HOST' LIBRARIAN_PORT='$HTTP_PORT' LIBRARIAN_ALLOWED_HOSTS='${LIBRARIAN_ALLOWED_HOSTS:-}' '$VENV_PY' '$SCRIPT_DIR/mcp/librarian_http.py' 2>&1 | tee -a '$LOGS_DIR/http.log'"
     echo "HTTP MCP server started in tmux '$HTTP_SESSION' → http://$HTTP_HOST:$HTTP_PORT/mcp"
     echo "Register a client with:"
     echo "  claude mcp add --transport http librarian http://$HTTP_HOST:$HTTP_PORT/mcp --header \"Authorization: Bearer $TOKEN\""

@@ -1,0 +1,40 @@
+# librarian.service — run the librarian's boot script (init.sh) under systemd.
+#
+# This is a *user* service: it runs as your login user, so it inherits your
+# Claude subscription auth (~/.claude) and your per-user tmux server — exactly
+# like running `bash init.sh` by hand. init.sh starts detached tmux sessions and
+# then exits, so this is a Type=oneshot unit with RemainAfterExit=yes: the unit
+# stays "active (exited)" and systemd leaves the tmux sessions running underneath
+# it. On stop, ExecStop runs stop.sh to tear those sessions (and stray claude
+# workers) down cleanly.
+#
+# @WORKDIR@ is filled in with this checkout's absolute path by systemd/install.sh,
+# which installs the rendered unit to ~/.config/systemd/user/librarian.service
+# and enables lingering so it also starts at boot without you logging in.
+
+[Unit]
+Description=Librarian agent — repo mirror sync + HTTP MCP server
+Documentation=file://@WORKDIR@/README.md
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@WORKDIR@
+
+# Login shell so ~/.local/bin (where `claude` lives) and the rest of your PATH
+# are present — user services otherwise boot with a bare PATH and can't find it.
+ExecStart=/bin/bash -lc 'exec ./init.sh'
+ExecStop=/bin/bash -lc 'exec ./stop.sh'
+
+# On a cold start init.sh runs a *synchronous* full `loop.sh` fetch (clone every
+# repo) before it launches any tmux session — minutes on a fresh mirror. Disable
+# the start timeout so systemd never kills init.sh mid-fetch; it exits on its own.
+TimeoutStartSec=infinity
+
+# init.sh exits 0 after launching the daemons; the tmux server it spawned lives in
+# this unit's cgroup. KillMode=mixed means a stop SIGTERMs init.sh's own shell but
+# leaves the wider cgroup to ExecStop (stop.sh) to bring down gracefully.
+KillMode=mixed
+
+[Install]
+WantedBy=default.target

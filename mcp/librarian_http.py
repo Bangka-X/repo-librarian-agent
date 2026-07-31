@@ -30,6 +30,7 @@ import uvicorn
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import librarian_core as core  # noqa: E402
@@ -43,7 +44,42 @@ if not TOKEN:
           file=sys.stderr)
     sys.exit(1)
 
-mcp = FastMCP("librarian", host=HOST, port=PORT)
+# DNS-rebinding protection: FastMCP's Streamable HTTP app validates the incoming
+# `Host` header against an allowlist and rejects anything not on it with HTTP 421
+# ("Invalid Host header"). The default allowlist is localhost only, so the moment
+# you front this server with a reverse proxy / tunnel (Cloudflare, nginx, …) every
+# request arrives with the *public* hostname as Host and gets refused — the MCP
+# client just sees the connection drop. List the public hostname(s) here.
+#
+# LIBRARIAN_ALLOWED_HOSTS: comma-separated Host values to allow, e.g.
+# When unset we DISABLE the Host check: this server already authenticates every
+# request with a bearer token (below), which a browser-driven DNS-rebinding attack
+# cannot forge, so the Host allowlist is redundant here. Set it to re-enable.
+_allowed = [h.strip() for h in
+            os.environ.get("LIBRARIAN_ALLOWED_HOSTS", "").split(",") if h.strip()]
+if _allowed:
+    _security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=_allowed + [f"{h}:*" for h in _allowed],
+        allowed_origins=[f"https://{h}" for h in _allowed]
+        + [f"http://{h}" for h in _allowed],
+    )
+else:
+    _security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+# Response mode. FastMCP can answer a POST either as a Server-Sent-Events stream
+# (`text/event-stream`, the default) or as a single plain `application/json` body.
+# Streaming through a buffering proxy/CDN (Cloudflare, nginx) is fragile: the edge
+# holds the open SSE stream, so the client never sees the response headers — most
+# importantly `Mcp-Session-Id` — and the connection looks dead (a bare "-1"). JSON
+# mode sidesteps that entirely: ordinary request/response, ordinary headers, no
+# long-lived stream to buffer. We default it ON because this server is built to sit
+# behind a reverse proxy/tunnel. Set LIBRARIAN_JSON_RESPONSE=0 to restore SSE.
+JSON_RESPONSE = os.environ.get("LIBRARIAN_JSON_RESPONSE", "1").strip().lower() \
+    not in ("0", "false", "no", "")
+
+mcp = FastMCP("librarian", host=HOST, port=PORT, transport_security=_security,
+              json_response=JSON_RESPONSE)
 
 
 @mcp.tool()
@@ -53,7 +89,7 @@ def ask_librarian(question: str, project: str | None = None,
     synthesized answer with citations (repo/path/file:line). Use for explanations, an
     API/contract, how something works, or anything spanning repos. Costs a Claude turn;
     to just locate code, prefer search_code. If you know the project code you're working on
-    (e.g. 'sierra', 'holocron'), pass it as `project` to scope and speed up the answer."""
+    (e.g. 'acme', 'globex'), pass it as `project` to scope and speed up the answer."""
     return core.ask_librarian(question, repos, project)
 
 
@@ -71,7 +107,7 @@ def read_project_map(project: str) -> str:
     """Return a project's synthesized overview: what the family of repos does, each member's
     role, the end-to-end flow and shared contracts WITHIN the project, with repo/path:line
     pointers. Cheap (no Claude turn). Read this FIRST when a question is scoped to a project
-    code (e.g. 'sierra') — it orients across the whole family before you drill into one repo
+    code (e.g. 'acme') — it orients across the whole family before you drill into one repo
     with read_repo_map."""
     return core.read_project_map(project)
 
@@ -126,7 +162,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         presented = auth[7:] if auth.startswith("Bearer ") else ""
         if not presented or not hmac.compare_digest(presented, self._token):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Accel-Buffering"] = "no"
+        return response
 
 
 app = mcp.streamable_http_app()
