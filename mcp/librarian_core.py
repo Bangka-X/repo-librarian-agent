@@ -15,6 +15,8 @@ import os
 import re
 import json
 import shutil
+import signal
+import hashlib
 import threading
 import subprocess
 from datetime import datetime
@@ -37,6 +39,10 @@ def _find_root(start):
 ROOT_DIR = _find_root(Path(__file__).resolve().parent)
 REPOS_DIR = ROOT_DIR / ".repositories"
 KNOW_DIR = ROOT_DIR / ".knowledge"            # curated maps, built by utils/digest.sh
+CACHE_DIR = KNOW_DIR / ".qa-cache"            # ask_librarian answer cache (own namespace,
+                                               # never an `index.md` — digest.sh's repo
+                                               # scan keys on that filename, so it's never
+                                               # mistaken for a mirrored repo)
 LOG_DIR = ROOT_DIR / ".logs"
 LOG_FILE = LOG_DIR / "librarian.log"          # concise one-line-per-call audit
 FEED_FILE = LOG_DIR / "librarian-feed.log"    # live trace of Claude's steps (tail -f in tmux)
@@ -72,9 +78,9 @@ def _config_int(key, default):
 
 
 MODEL = _config("LIBRARIAN_MODEL", "sonnet")        # backfill/digest: passed to `claude --model`
-ASK_MODEL = _config("LIBRARIAN_ASK_MODEL", "opus")  # ask_librarian only: interactive Q&A, worth the extra cost
+ASK_MODEL = _config("LIBRARIAN_ASK_MODEL", "haiku")  # ask_librarian only: on another agent's critical path, so default fast
 ALLOWED_TOOLS = "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
-ASK_TIMEOUT = _config_int("LIBRARIAN_ASK_TIMEOUT", 300)   # seconds for a librarian query
+ASK_TIMEOUT = _config_int("LIBRARIAN_ASK_TIMEOUT", 600)   # seconds for a librarian query
 SEARCH_CAP = _config_int("LIBRARIAN_SEARCH_CAP", 50)      # max grep matches returned
 LINE_CAP = _config_int("LIBRARIAN_LINE_CAP", 300)         # max chars per match line
 MAX_LOG_BYTES = 10 * 1024 * 1024   # cap each log file at 10 MB, keep one rollover
@@ -227,6 +233,94 @@ def _overview_path(project):
     if not project or "/" in project or project.startswith("."):
         return None
     return KNOW_DIR / project / "overview.md"
+
+
+# --- ask_librarian answer cache ----------------------------------------------
+# Keyed on (question, project, repos); invalidated by comparing each dependent
+# repo's indexed commit against what it was when the answer was cached — so a
+# repeated question is only ever served stale-free, never on a timer/TTL guess.
+
+def _map_commit(repo):
+    """The `commit:` frontmatter field from a repo's curated map, or '' if none."""
+    p = _map_path(repo)
+    if not p or not p.is_file():
+        return ""
+    try:
+        lines = p.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if line.startswith("commit:"):
+            return line[len("commit:"):].strip()
+    return ""
+
+
+def _cache_scope_repos(repos):
+    """Repos a cached answer's correctness depends on. `repos` is a hard limit
+    (the sub-agent can't read outside it), so that's the exact dependency set.
+    Without it — whether unscoped or only `project`-hinted, which does NOT stop
+    the sub-agent reaching elsewhere — the only safe fingerprint is the whole
+    mapped mirror; anything narrower could serve a stale answer silently after
+    an out-of-scope repo it actually consulted changes."""
+    if repos:
+        return sorted(set(r.strip() for r in repos if r.strip()))
+    return _mapped_repos()
+
+
+def _cache_key(question, project, repos):
+    norm_q = re.sub(r"\s+", " ", question.strip())
+    norm_repos = ",".join(sorted(set(r.strip() for r in repos if r.strip()))) if repos else ""
+    raw = f"{norm_q}\x1f{project}\x1f{norm_repos}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def _cache_path(key):
+    # Sharded by the hash's first 2 hex chars (same trick as git's object store)
+    # so one flat directory never has to hold every cached question — a lookup
+    # is still one direct path check either way, this just keeps `ls`/backups/
+    # the filesystem sane once there are thousands of entries.
+    return CACHE_DIR / key[:2] / f"{key}.json"
+
+
+def _cache_lookup(question, project, repos):
+    """A cached answer, or None on a cache miss OR staleness (any dependent
+    repo's commit moved since the answer was cached)."""
+    path = _cache_path(_cache_key(question, project, repos))
+    if not path.is_file():
+        return None
+    try:
+        entry = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if entry.get("fingerprint") != _cache_fingerprint(_cache_scope_repos(repos)):
+        return None
+    return entry.get("answer") or None
+
+
+def _cache_fingerprint(scope_repos):
+    return {r: _map_commit(r) for r in scope_repos}
+
+
+def _cache_store(question, project, repos, answer):
+    """Best-effort: a caching failure must never break a successful answer."""
+    try:
+        path = _cache_path(_cache_key(question, project, repos))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "question": question,
+            "project": project or None,
+            "repos": sorted(repos) if repos else None,
+            "fingerprint": _cache_fingerprint(_cache_scope_repos(repos)),
+            "answer": answer,
+            "cached_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        }
+        path.write_text(json.dumps(entry, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 # --- tools: each returns a text string --------------------------------------
@@ -418,12 +512,28 @@ def ask_librarian(question, repos=None, project=None):
     question = (question or "").strip()
     if not question:
         return "error: 'question' is required."
-    if not shutil.which("claude"):
-        _log("ask_librarian", "error", _now() - t0, "no claude CLI")
-        return "error: the 'claude' CLI is not on PATH."
 
     repos = repos or []
     project = (project or "").strip()
+    scope_label = f"project={project}" if project else f"repos={repos or 'all'}"
+    detail = f"{scope_label} q={question[:120]!r}"
+
+    # A repeat of the same (question, project, repos) is served instantly from
+    # the last answer, as long as every repo it depends on is still at the same
+    # commit it was indexed at when that answer was cached — no Claude turn, so
+    # a retry after a client-side timeout succeeds immediately the second time.
+    cached = _cache_lookup(question, project, repos)
+    if cached is not None:
+        ts = datetime.now().astimezone().isoformat(timespec="seconds")
+        _feed(f"\n┌─ {ts}  ask_librarian  ({scope_label})  [cache hit]")
+        _feed(f"│  Q: {question}")
+        _feed("└─ served from cache (no Claude turn)")
+        _log("ask_librarian", "cache-hit", _now() - t0, detail)
+        return cached
+
+    if not shutil.which("claude"):
+        _log("ask_librarian", "error", _now() - t0, "no claude CLI")
+        return "error: the 'claude' CLI is not on PATH."
 
     # Build a context preamble. A project code is a soft scope hint: point the
     # sub-agent at that family's overview and members first, but don't forbid
@@ -446,8 +556,6 @@ def ask_librarian(question, repos=None, project=None):
     env = dict(os.environ)
     env.pop("ANTHROPIC_API_KEY", None)  # force subscription auth (no metered API)
 
-    scope_label = f"project={project}" if project else f"repos={repos or 'all'}"
-    detail = f"{scope_label} q={question[:120]!r}"
     ts = datetime.now().astimezone().isoformat(timespec="seconds")
     _feed(f"\n┌─ {ts}  ask_librarian  ({scope_label})")
     _feed(f"│  Q: {question}")
@@ -456,11 +564,38 @@ def ask_librarian(question, repos=None, project=None):
     # still capturing the final answer to return to the caller.
     cmd = ["claude", "-p", prompt, "--model", ASK_MODEL, "--allowedTools", ALLOWED_TOOLS,
            "--verbose", "--output-format", "stream-json"]
+    # start_new_session=True puts the child in its own process group, so a timeout
+    # kill (below) can take out any grandchild it spawned (e.g. a slow `git blame`
+    # from ALLOWED_TOOLS) too, not just the immediate `claude` process.
     proc = subprocess.Popen(cmd, cwd=str(ROOT_DIR), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, bufsize=1)
-    timer = threading.Timer(ASK_TIMEOUT, proc.kill)
+                            text=True, bufsize=1, start_new_session=True)
+
+    def _kill_group():
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            pass
+
+    timer = threading.Timer(ASK_TIMEOUT, _kill_group)
     timer.start()
+
+    # --verbose makes `claude` write real volume to stderr; a pipe's OS buffer is
+    # only ~64KB, so if nothing drains it while stdout is also being read, the
+    # child blocks on its own stderr write and the whole call stalls until
+    # ASK_TIMEOUT kills it — indistinguishable from a genuinely slow query. Drain
+    # it concurrently in a thread, keeping only the tail for error reporting.
+    stderr_tail = [""]
+
+    def _drain_stderr():
+        try:
+            for line in proc.stderr:
+                stderr_tail[0] = (stderr_tail[0] + line)[-1000:]
+        except Exception:
+            pass
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
 
     result_text = None
     assistant_texts = []
@@ -485,14 +620,16 @@ def ask_librarian(question, repos=None, project=None):
         proc.wait()
     finally:
         timer.cancel()
+        stderr_thread.join(timeout=5)
 
     if proc.returncode and proc.returncode != 0:
         _feed("└─ FAILED")
         _log("ask_librarian", "fail", _now() - t0, detail)
-        err = (proc.stderr.read() or "").strip()[:1000] if proc.stderr else ""
-        return f"error: librarian query failed.\n{err}"
+        return f"error: librarian query failed.\n{stderr_tail[0].strip()}"
 
     answer = (result_text or "\n\n".join(assistant_texts)).strip()
+    if answer:
+        _cache_store(question, project, repos, answer)
     _feed(f"└─ done in {_now() - t0:.1f}s")
     _log("ask_librarian", "ok", _now() - t0, detail)
     return answer or "(no answer returned)"
@@ -505,9 +642,12 @@ TOOLS = [
         "description": (
             "Ask a natural-language question about the organization's repositories and get a "
             "synthesized answer with citations (repo/path/file:line). Use for explanations, an "
-            "API/contract, how something works, or anything spanning repos. Costs a Claude turn; "
-            "to just locate code, prefer search_code. If you know the project code you're working "
-            "on (e.g. 'sierra', 'holocron'), pass it as `project` to scope and speed up the answer."
+            "API/contract, how something works, or anything spanning repos. Costs a Claude turn "
+            "the first time; an exact repeat of the same question/project/repos is served "
+            "instantly from cache as long as the repos it depends on haven't changed since — safe "
+            "to retry the same question after a client-side timeout. To just locate code, prefer "
+            "search_code. If you know the project code you're working on (e.g. 'sierra', "
+            "'holocron'), pass it as `project` to scope and speed up the answer."
         ),
         "inputSchema": {
             "type": "object",

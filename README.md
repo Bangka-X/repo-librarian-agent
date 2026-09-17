@@ -71,12 +71,13 @@ is plain `KEY=value` shell with inline docs for every setting.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LIBRARIAN_MODEL` | `sonnet` | Claude model the librarian runs on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
+| `LIBRARIAN_MODEL` | `sonnet` | Claude model the bulk backfill/digest jobs run on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
+| `LIBRARIAN_ASK_MODEL` | `haiku` | Claude model the `ask_librarian` MCP tool runs on — it's on another agent's critical path, so it defaults to the fastest model; raise it to `sonnet`/`opus` if synthesis quality slips on deep cross-repo questions. |
 | `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the sync daemon re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
 | `LIBRARIAN_HOST` / `LIBRARIAN_PORT` | `127.0.0.1` / `8008` | Bind address for the remote HTTP MCP server. |
 | `BACKFILL_PACE_SECONDS` | `7200` | Sleep between cold-start deep-map cycles (paced around usage limits). Lower = faster. |
 | `BACKFILL_BATCH` | `20` | Repos deep-mapped per cycle. |
-| `LIBRARIAN_ASK_TIMEOUT` | `300` | Seconds an `ask_librarian` query may run before it's killed. |
+| `LIBRARIAN_ASK_TIMEOUT` | `600` | Seconds an `ask_librarian` query may run before it's killed. |
 | `LIBRARIAN_SEARCH_CAP` / `LIBRARIAN_LINE_CAP` | `50` / `300` | `search_code` caps: max matches, max chars per line. |
 
 See `librarian.conf` for the full set (backfill concurrency, stub batching, service
@@ -147,12 +148,20 @@ Notes:
 
 | Tool | What it does | Cost |
 |---|---|---|
-| `ask_librarian(question, repos?)` | synthesized, cited answer across the mirror | 1 Claude turn |
+| `ask_librarian(question, repos?)` | synthesized, cited answer across the mirror | 1 Claude turn (free, cached on an exact repeat) |
 | `list_repositories()` | mirrored repos + last commit | free (filesystem) |
 | `search_code(pattern, repos?)` | raw grep matches (capped at 50) | free (grep) |
 
 Agents are expected to use the two free tools to discover/narrow, then spend a Claude
 turn on `ask_librarian` for synthesis.
+
+**Answer cache.** `ask_librarian` caches each answer under `.knowledge/.qa-cache/`, keyed
+on the exact `(question, project, repos)` triple. A repeat of the same call is served
+instantly with no Claude turn — safe to retry after a client-side timeout. The cache
+never serves stale answers: it's invalidated per-entry by comparing the indexed `commit:`
+of every repo the answer depends on (the explicit `repos` list, or the whole mapped
+mirror when unscoped) against what it was when the answer was cached, so it re-asks
+Claude the moment any of those repos moves to a new commit.
 
 ## Syncing the mirror
 

@@ -87,9 +87,12 @@ def ask_librarian(question: str, project: str | None = None,
                   repos: list[str] | None = None) -> str:
     """Ask a natural-language question about the organization's repositories and get a
     synthesized answer with citations (repo/path/file:line). Use for explanations, an
-    API/contract, how something works, or anything spanning repos. Costs a Claude turn;
-    to just locate code, prefer search_code. If you know the project code you're working on
-    (e.g. 'acme', 'globex'), pass it as `project` to scope and speed up the answer."""
+    API/contract, how something works, or anything spanning repos. Costs a Claude turn the
+    first time; an exact repeat of the same question/project/repos is served instantly from
+    cache as long as the repos it depends on haven't changed since — safe to retry the same
+    question after a client-side timeout. To just locate code, prefer search_code. If you know
+    the project code you're working on (e.g. 'acme', 'globex'), pass it as `project` to scope
+    and speed up the answer."""
     return core.ask_librarian(question, repos, project)
 
 
