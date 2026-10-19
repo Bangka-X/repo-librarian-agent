@@ -72,6 +72,10 @@ PACE="${BACKFILL_PACE_SECONDS:-7200}";    [ "$PACE" -lt 0 ] && PACE=0
 STUB_BATCH="${BACKFILL_STUB_BATCH:-12}";  [ "$STUB_BATCH" -lt 1 ] && STUB_BATCH=1
 RETRIES="${BACKFILL_RETRIES:-3}"
 MODEL="${LIBRARIAN_MODEL:-sonnet}"        # passed to `claude --model`
+# Policy: never Opus. Any opus value (alias or full id) is downgraded to sonnet,
+# and sonnet runs at low effort (haiku takes no effort flag).
+case "$MODEL" in *[Oo]pus*) MODEL=sonnet ;; esac
+EFFORT_ARGS=(); case "$MODEL" in *[Hh]aiku*) ;; *) EFFORT_ARGS=(--effort low) ;; esac
 
 # --- needs_map: mirror digest.sh's skip rule (missing/provisional/stale) ------
 needs_map() {
@@ -281,7 +285,7 @@ Decode the name parts (project / component / target, split on _ and -) and their
 Provisional stub from first fetch — full deep map pending.
 
 Write ONLY the .knowledge/<repo>/index.md files listed. Mark uncertainty honestly."
-  claude_try claude -p "$APROMPT" --model "$MODEL" --allowedTools "Read,Grep,Glob,Write"
+  claude_try claude -p "$APROMPT" --model "$MODEL" "${EFFORT_ARGS[@]}" --allowedTools "Read,Grep,Glob,Write"
 }
 
 stage_a_worker() {       # $1 = 'proj|csv'

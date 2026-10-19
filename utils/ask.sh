@@ -21,6 +21,10 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # root; an env var of the same name still wins. See that file to change the model.
 [ -f "$ROOT_DIR/librarian.conf" ] && . "$ROOT_DIR/librarian.conf"
 MODEL="${LIBRARIAN_MODEL:-sonnet}"
+# Policy: never Opus. Any opus value (alias or full id) is downgraded to sonnet,
+# and sonnet runs at low effort (haiku takes no effort flag).
+case "$MODEL" in *[Oo]pus*) MODEL=sonnet ;; esac
+EFFORT_ARGS=(); case "$MODEL" in *[Hh]aiku*) ;; *) EFFORT_ARGS=(--effort low) ;; esac
 
 # Question from args, or from stdin if none were given.
 QUESTION="$*"
@@ -44,5 +48,5 @@ unset ANTHROPIC_API_KEY
 # Run from the project root so CLAUDE.md auto-loads and .repositories/ is in
 # scope. Read-only tools only — the librarian answers, never modifies.
 cd "$ROOT_DIR"
-exec claude -p "$QUESTION" --model "$MODEL" \
+exec claude -p "$QUESTION" --model "$MODEL" "${EFFORT_ARGS[@]}" \
   --allowedTools "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"

@@ -79,6 +79,18 @@ def _config_int(key, default):
 
 MODEL = _config("LIBRARIAN_MODEL", "sonnet")        # backfill/digest: passed to `claude --model`
 ASK_MODEL = _config("LIBRARIAN_ASK_MODEL", "haiku")  # ask_librarian only: on another agent's critical path, so default fast
+# Policy: never Opus. Any opus value is downgraded to sonnet; non-haiku models run
+# at low effort.
+def _no_opus(model):
+    return "sonnet" if "opus" in model.lower() else model
+
+
+def _effort_args(model):
+    return [] if "haiku" in model.lower() else ["--effort", "low"]
+
+
+MODEL = _no_opus(MODEL)
+ASK_MODEL = _no_opus(ASK_MODEL)
 ALLOWED_TOOLS = "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(git blame:*)"
 ASK_TIMEOUT = _config_int("LIBRARIAN_ASK_TIMEOUT", 600)   # seconds for a librarian query
 SEARCH_CAP = _config_int("LIBRARIAN_SEARCH_CAP", 50)      # max grep matches returned
@@ -562,7 +574,7 @@ def ask_librarian(question, repos=None, project=None):
 
     # Stream Claude's real steps so a tmux watcher can see the work live, while
     # still capturing the final answer to return to the caller.
-    cmd = ["claude", "-p", prompt, "--model", ASK_MODEL, "--allowedTools", ALLOWED_TOOLS,
+    cmd = ["claude", "-p", prompt, "--model", ASK_MODEL, *_effort_args(ASK_MODEL), "--allowedTools", ALLOWED_TOOLS,
            "--verbose", "--output-format", "stream-json"]
     # start_new_session=True puts the child in its own process group, so a timeout
     # kill (below) can take out any grandchild it spawned (e.g. a slow `git blame`

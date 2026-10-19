@@ -71,8 +71,8 @@ is plain `KEY=value` shell with inline docs for every setting.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LIBRARIAN_MODEL` | `sonnet` | Claude model the bulk backfill/digest jobs run on (`claude --model`). Alias (`sonnet`/`opus`/`haiku`) or full id. |
-| `LIBRARIAN_ASK_MODEL` | `haiku` | Claude model the `ask_librarian` MCP tool runs on — it's on another agent's critical path, so it defaults to the fastest model; raise it to `sonnet`/`opus` if synthesis quality slips on deep cross-repo questions. |
+| `LIBRARIAN_MODEL` | `sonnet` | Claude model the bulk backfill/digest jobs run on (`claude --model`). Alias (`sonnet`/`haiku`) or full id. Opus is never used: any opus value is downgraded to sonnet, and sonnet runs at `--effort low`. |
+| `LIBRARIAN_ASK_MODEL` | `haiku` | Claude model the `ask_librarian` MCP tool runs on — it's on another agent's critical path, so it defaults to the fastest model; raise it to `sonnet` if synthesis quality slips on deep cross-repo questions. |
 | `LIBRARIAN_SYNC_INTERVAL` | `15m` | How often the sync daemon re-syncs the mirror. (A positional arg to `init.sh` still wins.) |
 | `LIBRARIAN_HOST` / `LIBRARIAN_PORT` | `127.0.0.1` / `8008` | Bind address for the remote HTTP MCP server. |
 | `BACKFILL_PACE_SECONDS` | `7200` | Sleep between cold-start deep-map cycles (paced around usage limits). Lower = faster. |
@@ -85,7 +85,7 @@ toggles, …). An **environment variable of the same name takes precedence**, so
 override any setting for a single run without editing the file:
 
 ```bash
-LIBRARIAN_MODEL=opus bash utils/ask.sh "the hard cross-repo question"
+LIBRARIAN_MODEL=sonnet bash utils/ask.sh "the hard cross-repo question"
 BACKFILL_PACE_SECONDS=0 bash utils/backfill.sh      # one-off: build with no pacing
 ```
 
